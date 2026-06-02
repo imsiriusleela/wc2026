@@ -1,4 +1,4 @@
-"""Tests for features/odds.py and data/download_odds.py."""
+"""Tests for features/odds.py, data/download_odds.py, and data/download_wc2010_odds.py."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from wcpredictor.config import DATA_RAW, FDCO_ODDS_SHA256
+from wcpredictor.config import DATA_RAW, FDCO_ODDS_SHA256, WC2010_ODDS_CSV_SHA256
 from wcpredictor.features.odds import _implied_probs, align_odds_to_test, load_wc_odds
 
 
@@ -17,6 +17,10 @@ from wcpredictor.features.odds import _implied_probs, align_odds_to_test, load_w
 
 def _xlsx_present() -> bool:
     return (DATA_RAW / "WorldCup_fdco.xlsx").exists()
+
+
+def _wc2010_csv_present() -> bool:
+    return (DATA_RAW / "wc2010_odds.csv").exists()
 
 
 # ── implied_probs unit tests ────────────────────────────────────────────────
@@ -67,10 +71,15 @@ def test_xlsx_sha256_matches_pin() -> None:
 @pytest.mark.skipif(not _xlsx_present(), reason="WorldCup_fdco.xlsx not downloaded")
 def test_load_wc_odds_shape() -> None:
     df = load_wc_odds()
-    assert set(df["year"].unique()) == {2014, 2018, 2022}
+    expected_years = {2014, 2018, 2022}
+    if _wc2010_csv_present():
+        expected_years.add(2010)
+    assert expected_years.issubset(set(df["year"].unique()))
     # 64 matches per WC
     for year in (2014, 2018, 2022):
         assert len(df[df["year"] == year]) == 64, f"Expected 64 rows for WC{year}"
+    if _wc2010_csv_present():
+        assert len(df[df["year"] == 2010]) == 64, "Expected 64 rows for WC2010"
 
 
 @pytest.mark.skipif(not _xlsx_present(), reason="WorldCup_fdco.xlsx not downloaded")
@@ -132,11 +141,95 @@ def test_align_odds_full_coverage() -> None:
         assert abs(sum(row) - 1.0) < 1e-6
 
 
+@pytest.mark.skipif(
+    _xlsx_present() and _wc2010_csv_present(),
+    reason="WC2010 odds are now present — use test_align_odds_2010_present instead",
+)
 @pytest.mark.skipif(not _xlsx_present(), reason="WorldCup_fdco.xlsx not downloaded")
-def test_align_odds_returns_none_for_2010() -> None:
-    """2010 has no odds in the source file → None."""
+def test_align_odds_returns_none_for_2010_when_csv_absent() -> None:
+    """When wc2010_odds.csv is absent, 2010 fold returns None."""
     odds_df = load_wc_odds()
-    # Create a dummy test_elo for 2010 (actual content doesn't matter)
     dummy = pd.DataFrame({"team_a": ["Brazil"], "team_b": ["South Africa"]})
     result = align_odds_to_test(odds_df, 2010, dummy)
+    assert result is None
+
+
+# ── WC2010 betexplorer CSV tests ────────────────────────────────────────────
+
+
+@pytest.mark.skipif(not _wc2010_csv_present(), reason="wc2010_odds.csv not generated")
+def test_wc2010_csv_row_count() -> None:
+    df = pd.read_csv(DATA_RAW / "wc2010_odds.csv")
+    assert len(df) == 64, f"Expected 64 WC2010 matches, got {len(df)}"
+
+
+@pytest.mark.skipif(not _wc2010_csv_present(), reason="wc2010_odds.csv not generated")
+def test_wc2010_csv_sha256_matches_pin() -> None:
+    path = DATA_RAW / "wc2010_odds.csv"
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert actual == WC2010_ODDS_CSV_SHA256, (
+        f"SHA-256 mismatch: expected {WC2010_ODDS_CSV_SHA256}, got {actual}. "
+        "Update WC2010_ODDS_CSV_SHA256 in config.py if snapshots were refreshed."
+    )
+
+
+@pytest.mark.skipif(not _wc2010_csv_present(), reason="wc2010_odds.csv not generated")
+def test_wc2010_csv_prob_sums_to_one() -> None:
+    df = pd.read_csv(DATA_RAW / "wc2010_odds.csv")
+    for _, row in df.iterrows():
+        pw, pd_, pl = _implied_probs(row["odds_h"], row["odds_d"], row["odds_a"])
+        assert abs(pw + pd_ + pl - 1.0) < 1e-9
+
+
+@pytest.mark.skipif(not _wc2010_csv_present(), reason="wc2010_odds.csv not generated")
+def test_wc2010_csv_canonical_names() -> None:
+    df = pd.read_csv(DATA_RAW / "wc2010_odds.csv")
+    # "USA" should be mapped to "United States" by canonical()
+    assert "USA" not in df["home"].values
+    assert "USA" not in df["away"].values
+    # "United States" should be present
+    assert "United States" in df["home"].values or "United States" in df["away"].values
+
+
+@pytest.mark.skipif(not _wc2010_csv_present(), reason="wc2010_odds.csv not generated")
+def test_wc2010_load_wc_odds_includes_2010(tmp_path) -> None:
+    if not _xlsx_present():
+        pytest.skip("WorldCup_fdco.xlsx not downloaded")
+    df = load_wc_odds()
+    assert 2010 in df["year"].values
+    assert len(df[df["year"] == 2010]) == 64
+
+
+@pytest.mark.skipif(not _wc2010_csv_present(), reason="wc2010_odds.csv not generated")
+def test_wc2010_symmetric_alignment() -> None:
+    """align_odds_to_test registers both (a,b) and (b,a); W/L swap on reversal."""
+    if not _xlsx_present():
+        pytest.skip("WorldCup_fdco.xlsx not downloaded")
+    odds_df = load_wc_odds()
+    yr = odds_df[odds_df["year"] == 2010].iloc[0]
+    ta, tb = str(yr.team_a), str(yr.team_b)
+
+    # Forward: (a, b) → [p_win, p_draw, p_loss]
+    fwd = pd.DataFrame({"team_a": [ta], "team_b": [tb]})
+    res_fwd = align_odds_to_test(odds_df, 2010, fwd)
+    assert res_fwd is not None
+    assert abs(sum(res_fwd[0]) - 1.0) < 1e-6
+
+    # Reversed: (b, a) → [p_loss, p_draw, p_win]  (W/L swap)
+    rev = pd.DataFrame({"team_a": [tb], "team_b": [ta]})
+    res_rev = align_odds_to_test(odds_df, 2010, rev)
+    assert res_rev is not None
+    assert abs(res_rev[0][0] - res_fwd[0][2]) < 1e-9  # p_win reversed = p_loss forward
+    assert abs(res_rev[0][1] - res_fwd[0][1]) < 1e-9  # p_draw unchanged
+    assert abs(res_rev[0][2] - res_fwd[0][0]) < 1e-9  # p_loss reversed = p_win forward
+
+
+@pytest.mark.skipif(not _xlsx_present(), reason="WorldCup_fdco.xlsx not downloaded")
+def test_align_odds_2010_graceful_skip_when_csv_absent(tmp_path) -> None:
+    """When wc2010_odds.csv is absent, align_odds_to_test returns None for year=2010."""
+    # Build odds_df without 2010 rows (simulate absent CSV)
+    full_df = load_wc_odds()
+    df_no_2010 = full_df[full_df["year"] != 2010].copy()
+    dummy = pd.DataFrame({"team_a": ["Brazil"], "team_b": ["South Africa"]})
+    result = align_odds_to_test(df_no_2010, 2010, dummy)
     assert result is None

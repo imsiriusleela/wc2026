@@ -37,6 +37,7 @@ from wcpredictor.config import (
 )
 from wcpredictor.data.download import download_results
 from wcpredictor.data.download_odds import download_odds
+from wcpredictor.data.download_wc2010_odds import parse_wc2010_odds
 from wcpredictor.data.load_matches import load_matches
 from wcpredictor.features.odds import align_odds_to_test, load_wc_odds
 from wcpredictor.evaluation.metrics import (
@@ -151,13 +152,15 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
         download_results()
     if not (DATA_RAW / "WorldCup_fdco.xlsx").exists():
         download_odds()
+    if not (DATA_RAW / "wc2010_odds.csv").exists():
+        parse_wc2010_odds()
 
     matches = load_matches()
     elo_all, _final_ratings = compute_elo(matches)
     form_all, _ = compute_form(matches)
     elo_all = elo_all.merge(form_all, on="match_id", how="left")
 
-    # Load market odds (WC 2014/2018/2022 only; 2010 absent from source)
+    # Load market odds (WC 2010 from betexplorer CSV; 2014/2018/2022 from fdco xlsx)
     odds_df = load_wc_odds()
 
     # Rolling collector for time-aware α fitting (no leakage)
@@ -324,7 +327,7 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
         ens_pred_b = [matrix_to_lambdas(m)[1] for m in ens_matrices]
         ens_top_sc = [matrix_to_top_scorelines(m) for m in ens_matrices]
 
-        # ── Market-odds blending (2014/2018/2022 only; 2010 absent from source) ──
+        # ── Market-odds blending (all four folds: 2010 betexplorer + 2014/2018/2022 fdco) ──
         market_probs_test = align_odds_to_test(odds_df, year, test_elo)
         ens_market_info: dict = {}
         ens_probs_market: list[list[float]] = []

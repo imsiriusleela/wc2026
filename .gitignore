@@ -18,3 +18,6 @@ data/processed/
 
 # pytest
 .pytest_cache/
+
+# Playwright MCP tooling
+.playwright-mcp/

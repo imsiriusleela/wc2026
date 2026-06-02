@@ -47,6 +47,13 @@ FDCO_ODDS_URL: str = "https://www.football-data.co.uk/WorldCup2026.xlsx"
 FDCO_ODDS_SHA256: str = "777652ce1a400aabbbb5778f306311f36197b7e382ff87d5077b5a017473ae72"
 ODDS_ALPHA_PRIOR: float = 0.0  # conservative: no market weight until time-aware data supports it
 
+# WC2010 odds from betexplorer.com (one-time Playwright render, user-approved 2026-06-02)
+# Source: betexplorer.com/football/world/world-cup-2010/results/
+# Snapshots: data/raw/wc2010_odds_snapshot_groups.html, wc2010_odds_snapshot_knockout.html
+WC2010_ODDS_URL: str = "https://www.betexplorer.com/football/world/world-cup-2010/results/"
+# SHA-256 of data/raw/wc2010_odds.csv generated from the Playwright snapshots
+WC2010_ODDS_CSV_SHA256: str = "602bb2c598a91e81359e2728537a300edaa1cc5571c1dec0cc1be4c85c0a52b7"
+
 # Form features
 FORM_WINDOW: int = 5                               # rolling window for recent-form features
 REST_DAYS_CAP: int = 30                            # cap on days-since-last-match

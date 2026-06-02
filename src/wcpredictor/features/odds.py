@@ -45,7 +45,7 @@ def load_wc_odds(xlsx_path: Path | None = None) -> pd.DataFrame:
     p_win  = implied prob that team_a wins in 90 min.
     p_loss = implied prob that team_b wins in 90 min.
 
-    Only WC 2014, 2018, 2022 rows are returned (2010 is absent from the file).
+    Covers WC 2010 (betexplorer CSV), 2014, 2018, 2022 (football-data.co.uk xlsx).
     """
     if xlsx_path is None:
         xlsx_path = DATA_RAW / "WorldCup_fdco.xlsx"
@@ -108,7 +108,23 @@ def load_wc_odds(xlsx_path: Path | None = None) -> pd.DataFrame:
             )
 
     wb.close()
-    return pd.DataFrame(records)
+    df_xlsx = pd.DataFrame(records)
+
+    # Merge WC2010 odds from betexplorer CSV (if available)
+    wc2010_csv = DATA_RAW / "wc2010_odds.csv"
+    if wc2010_csv.exists():
+        df2010 = pd.read_csv(wc2010_csv, parse_dates=["date"])
+        df2010["team_a"] = df2010["home"].apply(canonical)
+        df2010["team_b"] = df2010["away"].apply(canonical)
+        df2010[["p_win", "p_draw", "p_loss"]] = df2010.apply(
+            lambda r: pd.Series(_implied_probs(r["odds_h"], r["odds_d"], r["odds_a"])),
+            axis=1,
+        )
+        df2010["year"] = 2010
+        df2010 = df2010[["year", "date", "team_a", "team_b", "p_win", "p_draw", "p_loss"]]
+        df_xlsx = pd.concat([df2010, df_xlsx], ignore_index=True)
+
+    return df_xlsx
 
 
 def align_odds_to_test(
@@ -118,6 +134,10 @@ def align_odds_to_test(
 ) -> list[list[float]] | None:
     """Align odds rows to test_elo by (team_a, team_b) within the given WC year.
 
+    Lookup is symmetric: if (a, b) is in the odds with [p_win, p_draw, p_loss],
+    then (b, a) is also registered as [p_loss, p_draw, p_win] (W/L swap).
+    This handles betexplorer home/away ordering differing from our dataset.
+
     Returns a list of [p_win, p_draw, p_loss] in the same row order as test_elo,
     or None if fewer than 50 % of test rows can be matched (signals unusable data).
     Unmatched rows fall back to uniform [1/3, 1/3, 1/3].
@@ -126,10 +146,13 @@ def align_odds_to_test(
     if yr_odds.empty:
         return None
 
-    lookup: dict[tuple[str, str], list[float]] = {
-        (str(r.team_a), str(r.team_b)): [r.p_win, r.p_draw, r.p_loss]
-        for _, r in yr_odds.iterrows()
-    }
+    lookup: dict[tuple[str, str], list[float]] = {}
+    for _, r in yr_odds.iterrows():
+        ta, tb = str(r.team_a), str(r.team_b)
+        probs = [r.p_win, r.p_draw, r.p_loss]
+        lookup[(ta, tb)] = probs
+        # Symmetric: reversed fixture swaps win/loss
+        lookup[(tb, ta)] = [r.p_loss, r.p_draw, r.p_win]
 
     result: list[list[float]] = []
     matched = 0
