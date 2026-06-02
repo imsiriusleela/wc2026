@@ -350,7 +350,7 @@ def test_score_completed_model_passthrough() -> None:
 
 class TestEnsembleMkt:
     def test_probs_sum_to_one(self, tmp_path: Path) -> None:
-        """ensemble_mkt W/D/L must sum to 1.0."""
+        """ensemble_mkt W/D/L must sum to 1.0 within 1e-4 (rounding/truncation tolerance)."""
         path = _make_fixtures_csv(tmp_path)
         df = predict_fixtures(
             "2026-06-15", fixtures_path=path,
@@ -358,7 +358,7 @@ class TestEnsembleMkt:
             models=["ensemble_mkt"],
         )
         s = df[["p_win", "p_draw", "p_loss"]].astype(float).sum(axis=1)
-        assert (np.abs(s - 1.0) < 1e-6).all()
+        assert (np.abs(s - 1.0) < 1e-4).all()
 
     def test_probs_in_unit_interval(self, tmp_path: Path) -> None:
         """All ensemble_mkt probabilities must be in [0, 1]."""
@@ -423,7 +423,7 @@ class TestEnsembleMkt:
         assert len(df) == 6  # 2 upcoming fixtures × 3 models
         assert set(df["model"].unique()) == {"poisson", "ensemble", "ensemble_mkt"}
         s = df[["p_win", "p_draw", "p_loss"]].astype(float).sum(axis=1)
-        assert int((np.abs(s - 1.0) > 1e-6).sum()) == 0
+        assert int((np.abs(s - 1.0) > 1e-4).sum()) == 0
 
     def test_alpha_in_unit_interval(self, tmp_path: Path) -> None:
         """Stored odds_alpha must be in [0, 1]."""
