@@ -8,8 +8,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import math
+
 from wcpredictor.config import DATA_RAW, FDCO_ODDS_SHA256, WC2010_ODDS_CSV_SHA256
-from wcpredictor.features.odds import _implied_probs, align_odds_to_test, load_wc_odds
+from wcpredictor.features.odds import (
+    _implied_probs,
+    align_odds_to_test,
+    load_wc_odds,
+    merge_odds_features,
+)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -21,6 +28,86 @@ def _xlsx_present() -> bool:
 
 def _wc2010_csv_present() -> bool:
     return (DATA_RAW / "wc2010_odds.csv").exists()
+
+
+# ── merge_odds_features unit tests ─────────────────────────────────────────
+
+
+def _make_odds_df() -> pd.DataFrame:
+    return pd.DataFrame({
+        "year": [2014, 2014, 2018],
+        "date": pd.to_datetime(["2014-06-12", "2014-06-13", "2018-06-15"]),
+        "team_a": ["Germany", "Brazil", "France"],
+        "team_b": ["Portugal", "Croatia", "Australia"],
+        "p_win": [0.60, 0.70, 0.65],
+        "p_draw": [0.25, 0.18, 0.22],
+        "p_loss": [0.15, 0.12, 0.13],
+    })
+
+
+def _make_features_df() -> pd.DataFrame:
+    return pd.DataFrame({
+        "date": pd.to_datetime(["2014-06-12", "2014-06-13", "2018-06-15", "2015-08-01"]),
+        "team_a": ["Germany", "Brazil", "France", "Spain"],
+        "team_b": ["Portugal", "Croatia", "Australia", "England"],
+        "elo_diff_adj": [50.0, 80.0, 60.0, 20.0],
+        "neutral": [True, True, True, False],
+    })
+
+
+def test_merge_odds_features_matched_rows() -> None:
+    feats = _make_features_df()
+    odds = _make_odds_df()
+    result = merge_odds_features(feats, odds)
+    # First three rows have odds
+    for i in range(3):
+        assert result["has_odds"].iloc[i] == 1.0
+        assert not math.isnan(result["odds_p_win"].iloc[i])
+        assert abs(result["odds_p_win"].iloc[i] + result["odds_p_draw"].iloc[i] + result["odds_p_loss"].iloc[i] - 1.0) < 1e-9
+
+
+def test_merge_odds_features_unmatched_row_nan() -> None:
+    feats = _make_features_df()
+    odds = _make_odds_df()
+    result = merge_odds_features(feats, odds)
+    # Last row (Spain vs England, 2015) has no odds
+    assert result["has_odds"].iloc[3] == 0.0
+    assert math.isnan(result["odds_p_win"].iloc[3])
+    assert math.isnan(result["odds_p_draw"].iloc[3])
+    assert math.isnan(result["odds_p_loss"].iloc[3])
+
+
+def test_merge_odds_features_symmetric_wl_swap() -> None:
+    """(Portugal, Germany, 2014) should get p_win = original p_loss and vice versa."""
+    feats = pd.DataFrame({
+        "date": pd.to_datetime(["2014-06-12"]),
+        "team_a": ["Portugal"],
+        "team_b": ["Germany"],
+        "elo_diff_adj": [-50.0],
+        "neutral": [True],
+    })
+    odds = _make_odds_df()
+    result = merge_odds_features(feats, odds)
+    assert result["has_odds"].iloc[0] == 1.0
+    # Germany (team_a in odds) had p_win=0.60 → Portugal (reversed) gets p_win=0.15
+    assert abs(result["odds_p_win"].iloc[0] - 0.15) < 1e-9
+    assert abs(result["odds_p_loss"].iloc[0] - 0.60) < 1e-9
+    assert abs(result["odds_p_draw"].iloc[0] - 0.25) < 1e-9
+
+
+def test_merge_odds_features_does_not_mutate_input() -> None:
+    feats = _make_features_df()
+    original_cols = list(feats.columns)
+    merge_odds_features(feats, _make_odds_df())
+    assert list(feats.columns) == original_cols
+
+
+def test_merge_odds_features_empty_odds_all_nan() -> None:
+    feats = _make_features_df()
+    empty_odds = pd.DataFrame(columns=["year", "date", "team_a", "team_b", "p_win", "p_draw", "p_loss"])
+    result = merge_odds_features(feats, empty_odds)
+    assert all(result["has_odds"] == 0.0)
+    assert all(math.isnan(v) for v in result["odds_p_win"])
 
 
 # ── implied_probs unit tests ────────────────────────────────────────────────

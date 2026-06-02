@@ -39,7 +39,7 @@ from wcpredictor.data.download import download_results
 from wcpredictor.data.download_odds import download_odds
 from wcpredictor.data.download_wc2010_odds import parse_wc2010_odds
 from wcpredictor.data.load_matches import load_matches
-from wcpredictor.features.odds import align_odds_to_test, load_wc_odds
+from wcpredictor.features.odds import align_odds_to_test, load_wc_odds, merge_odds_features
 from wcpredictor.evaluation.metrics import (
     accuracy,
     brier,
@@ -164,6 +164,9 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
 
     # Load market odds (WC 2010 from betexplorer CSV; 2014/2018/2022 from fdco xlsx)
     odds_df = load_wc_odds()
+    # Attach odds_p_win/draw/loss + has_odds to every row; NaN where no WC odds exist.
+    # GBM is the only member that uses these cols; HGB handles NaN natively.
+    elo_all = merge_odds_features(elo_all, odds_df)
 
     # Rolling collector for time-aware α fitting (no leakage)
     prev_odds_labels: list[int] = []

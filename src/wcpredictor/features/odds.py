@@ -26,6 +26,7 @@ _SHEET_YEARS: dict[str, int] = {
     "WorldCup2014": 2014,
     "WorldCup2018": 2018,
     "WorldCup2022": 2022,
+    "WorldCup2026": 2026,  # sheet appears on fdco a few days before kickoff; skipped if absent
 }
 
 # All three average-market columns must be present
@@ -125,6 +126,65 @@ def load_wc_odds(xlsx_path: Path | None = None) -> pd.DataFrame:
         df_xlsx = pd.concat([df2010, df_xlsx], ignore_index=True)
 
     return df_xlsx
+
+
+def merge_odds_features(
+    features_df: pd.DataFrame,
+    odds_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Attach odds_p_win / odds_p_draw / odds_p_loss / has_odds to features_df.
+
+    Keying: (year, team_a, team_b) extracted from the date column.
+    Symmetric: if (a, b) is in odds_df, (b, a) is also registered with W/L swapped.
+    Rows with no odds match get NaN for the three probability columns and 0.0 for
+    has_odds.  NaN is intentional — HGB handles it natively; zero-fill would lie.
+
+    Parameters
+    ----------
+    features_df : must contain date, team_a, team_b columns.
+    odds_df     : output of load_wc_odds() — year, team_a, team_b, p_win, p_draw, p_loss.
+
+    Returns
+    -------
+    Copy of features_df with four new columns appended.
+    """
+    lookup: dict[tuple[int, str, str], tuple[float, float, float]] = {}
+    for _, r in odds_df.iterrows():
+        ta, tb = str(r.team_a), str(r.team_b)
+        yr = int(r.year)
+        fwd = (float(r.p_win), float(r.p_draw), float(r.p_loss))
+        lookup[(yr, ta, tb)] = fwd
+        lookup[(yr, tb, ta)] = (fwd[2], fwd[1], fwd[0])  # W/L swap
+
+    years = features_df["date"].dt.year.to_numpy(int)
+    ta_arr = features_df["team_a"].astype(str).to_numpy()
+    tb_arr = features_df["team_b"].astype(str).to_numpy()
+
+    p_wins: list[float] = []
+    p_draws: list[float] = []
+    p_losses: list[float] = []
+    has_odds_vals: list[float] = []
+
+    for yr, ta, tb in zip(years, ta_arr, tb_arr):
+        key = (int(yr), ta, tb)
+        if key in lookup:
+            pw, pd_, pl = lookup[key]
+            p_wins.append(pw)
+            p_draws.append(pd_)
+            p_losses.append(pl)
+            has_odds_vals.append(1.0)
+        else:
+            p_wins.append(float("nan"))
+            p_draws.append(float("nan"))
+            p_losses.append(float("nan"))
+            has_odds_vals.append(0.0)
+
+    out = features_df.copy()
+    out["odds_p_win"] = p_wins
+    out["odds_p_draw"] = p_draws
+    out["odds_p_loss"] = p_losses
+    out["has_odds"] = has_odds_vals
+    return out
 
 
 def align_odds_to_test(

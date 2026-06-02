@@ -79,6 +79,8 @@ def predict_proba(
 
 _FORM_COLS = ("form_diff", "momentum_diff", "rest_diff")
 _ELO_COLS = ("elo_a_pre", "elo_b_pre")
+# Odds cols must NOT be zero-filled when absent — NaN tells HGB "no odds here"
+_ODDS_COLS = ("odds_p_win", "odds_p_draw", "odds_p_loss", "has_odds")
 
 
 def _build_X(features_df: pd.DataFrame) -> np.ndarray:
@@ -96,4 +98,11 @@ def _build_X(features_df: pd.DataFrame) -> np.ndarray:
             cols.append(features_df[col].to_numpy(float))
         else:
             cols.append(np.zeros(len(features_df), dtype=float))
+    # Odds cols: pass NaN through — HGB handles NaN natively via learned split direction.
+    # has_odds absent → full NaN column (all rows treated as no-odds by the tree).
+    for col in _ODDS_COLS:
+        if col in features_df.columns:
+            cols.append(features_df[col].to_numpy(float))
+        else:
+            cols.append(np.full(len(features_df), np.nan))
     return np.column_stack(cols)

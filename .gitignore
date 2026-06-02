@@ -21,3 +21,6 @@ data/processed/
 
 # Playwright MCP tooling
 .playwright-mcp/
+
+# Agent memory store (do not commit)
+memory/

@@ -14,11 +14,13 @@ predict_match(team_a, team_b, date, neutral=True, model="poisson") -> dict
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
 
-from wcpredictor.config import INITIAL_RATING
+from wcpredictor.config import DATA_PROCESSED, DATA_RAW, INITIAL_RATING
 from wcpredictor.data.download import download_results
 from wcpredictor.data.load_matches import load_matches
 from wcpredictor.data.normalize_teams import canonical
@@ -86,7 +88,9 @@ def predict_match(
     r_b = ratings.get(team_b, INITIAL_RATING)
 
     if model == "ensemble":
-        from wcpredictor.config import DC_CAL_VALIDATION_YEARS, ENSEMBLE_POOL
+        from wcpredictor.config import DATA_RAW, DC_CAL_VALIDATION_YEARS, ENSEMBLE_POOL
+        from wcpredictor.data.download_odds import download_odds
+        from wcpredictor.features.odds import load_wc_odds, merge_odds_features
         from wcpredictor.models.calibration import apply as cal_apply
         from wcpredictor.models.calibration import fit_temperature
         from wcpredictor.models.dixon_coles import fit as dc_fit
@@ -104,6 +108,10 @@ def predict_match(
         from wcpredictor.models.logistic import predict_proba as log_predict
 
         import numpy as _np
+
+        if not (DATA_RAW / "WorldCup_fdco.xlsx").exists():
+            download_odds()
+        elo_df = merge_odds_features(elo_df, load_wc_odds())
 
         cal_start = cutoff - pd.DateOffset(years=DC_CAL_VALIDATION_YEARS)
 
@@ -162,6 +170,7 @@ def predict_match(
         p_dc = dc_predict_one(dc_params, team_a, team_b, neutral=neutral)
 
         fr = _form_row(form_state, team_a, team_b, cutoff)
+        import math as _math
         test_row = pd.DataFrame({
             "elo_diff_adj": [elo_diff_adj],
             "neutral": [neutral],
@@ -170,6 +179,11 @@ def predict_match(
             "rest_diff": [fr["rest_diff"]],
             "elo_a_pre": [r_a],
             "elo_b_pre": [r_b],
+            # Odds are NaN until WC2026 odds are fetched (Part B)
+            "odds_p_win": [_math.nan],
+            "odds_p_draw": [_math.nan],
+            "odds_p_loss": [_math.nan],
+            "has_odds": [0.0],
         })
         p_log_proba = log_predict(log_scaler, log_model, test_row)[0]
         p_tree_proba = tree_predict(tree_model, test_row)[0]
@@ -228,3 +242,63 @@ def predict_match(
         }
     )
     return result
+
+
+def predict_fixtures(
+    as_of_date: str,
+    fixtures_path: Path | None = None,
+    model: Literal["poisson", "dixon_coles", "ensemble"] = "ensemble",
+    output_path: Path | None = None,
+) -> pd.DataFrame:
+    """Generate predictions for all WC2026 fixtures not yet played.
+
+    Parameters
+    ----------
+    as_of_date    : ISO date string; fixtures on or after this date are predicted.
+    fixtures_path : path to wc2026_fixtures.csv; defaults to DATA_RAW/wc2026_fixtures.csv.
+    model         : which model to use for each prediction.
+    output_path   : where to save the predictions CSV; defaults to
+                    DATA_PROCESSED/wc2026_predictions_<as_of_date>.csv.
+
+    Returns
+    -------
+    DataFrame with one row per upcoming fixture plus p_win/draw/loss and model output.
+    Raises FileNotFoundError if fixtures_path does not exist.
+    """
+    if fixtures_path is None:
+        fixtures_path = DATA_RAW / "wc2026_fixtures.csv"
+
+    if not Path(fixtures_path).exists():
+        raise FileNotFoundError(
+            f"WC2026 fixtures file not found: {fixtures_path}\n"
+            "Run: uv run python -m wcpredictor.data.download_wc2026"
+        )
+
+    as_of = pd.Timestamp(as_of_date)
+    fixtures = pd.read_csv(fixtures_path, parse_dates=["date"])
+    upcoming = fixtures[fixtures["date"] >= as_of].copy()
+
+    rows: list[dict] = []
+    for _, fix in upcoming.iterrows():
+        ta = canonical(str(fix["team_a"]))
+        tb = canonical(str(fix["team_b"]))
+        neutral = bool(fix.get("neutral", True))
+        date_str = fix["date"].strftime("%Y-%m-%d")
+        try:
+            pred = predict_match(ta, tb, date_str, neutral=neutral, model=model)
+        except Exception as exc:
+            pred = {
+                "team_a": ta, "team_b": tb, "date": date_str, "neutral": neutral,
+                "p_win": None, "p_draw": None, "p_loss": None,
+                "error": str(exc),
+            }
+        rows.append(pred)
+
+    df = pd.DataFrame(rows)
+
+    if output_path is None:
+        DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+        output_path = DATA_PROCESSED / f"wc2026_predictions_{as_of_date}.csv"
+
+    df.to_csv(output_path, index=False)
+    return df

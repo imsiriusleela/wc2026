@@ -6,7 +6,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from wcpredictor.models.gbm import _build_X, fit, predict_proba
+import math
+
+from wcpredictor.models.gbm import _ODDS_COLS, _build_X, fit, predict_proba
 
 
 def _make_features(n: int, seed: int = 0) -> pd.DataFrame:
@@ -73,11 +75,26 @@ def test_determinism():
 
 # ── feature builder ───────────────────────────────────────────────────────────
 
+def _make_features_with_odds(n: int, seed: int = 0) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    df = _make_features(n, seed)
+    # Half the rows have real odds; half are NaN
+    p_win = np.where(np.arange(n) % 2 == 0, rng.uniform(0.3, 0.6, n), np.nan)
+    p_draw = np.where(np.arange(n) % 2 == 0, rng.uniform(0.1, 0.3, n), np.nan)
+    p_loss = np.where(np.arange(n) % 2 == 0, 1.0 - p_win - p_draw, np.nan)
+    has_odds = np.where(np.arange(n) % 2 == 0, 1.0, 0.0)
+    df["odds_p_win"] = p_win
+    df["odds_p_draw"] = p_draw
+    df["odds_p_loss"] = p_loss
+    df["has_odds"] = has_odds
+    return df
+
+
 def test_build_X_shape_with_all_cols():
     df = _make_features(30)
     X = _build_X(df)
-    # 2 elo cols + 3 form cols + 2 raw elo cols = 7
-    assert X.shape == (30, 7)
+    # 2 base + 3 form + 2 raw elo = 7; no odds cols present → 4 NaN columns appended
+    assert X.shape == (30, 11)
 
 
 def test_build_X_missing_form_cols_zero_filled():
@@ -88,7 +105,7 @@ def test_build_X_missing_form_cols_zero_filled():
         "elo_b_pre": np.ones(10) * 1500,
     })
     X = _build_X(df)
-    assert X.shape == (10, 7)
+    assert X.shape == (10, 11)
     # form_diff, momentum_diff, rest_diff columns (indices 2,3,4) must be 0
     np.testing.assert_array_equal(X[:, 2], np.zeros(10))
     np.testing.assert_array_equal(X[:, 3], np.zeros(10))
@@ -101,9 +118,36 @@ def test_build_X_missing_raw_elo_cols_zero_filled():
         "neutral": np.zeros(5),
     })
     X = _build_X(df)
-    assert X.shape == (5, 7)
+    assert X.shape == (5, 11)
     np.testing.assert_array_equal(X[:, 5], np.zeros(5))
     np.testing.assert_array_equal(X[:, 6], np.zeros(5))
+
+
+def test_build_X_odds_cols_present_pass_nan_through():
+    df = _make_features_with_odds(10)
+    X = _build_X(df)
+    assert X.shape == (10, 11)
+    # Even-indexed rows have odds; odd-indexed have NaN
+    assert not math.isnan(X[0, 7])   # odds_p_win for even row
+    assert math.isnan(X[1, 7])       # NaN for odd row (no odds)
+
+
+def test_build_X_odds_absent_columns_all_nan():
+    """When odds cols are missing from the DataFrame, _build_X emits all-NaN columns."""
+    df = _make_features(8)
+    X = _build_X(df)
+    # Columns 7-10 are the four odds columns — must all be NaN when not present
+    for col_idx in range(7, 11):
+        assert all(math.isnan(v) for v in X[:, col_idx])
+
+
+def test_build_X_has_odds_flag_values():
+    df = _make_features_with_odds(6)
+    X = _build_X(df)
+    # has_odds is col 10 (last); even rows = 1.0, odd rows = 0.0
+    for i in range(6):
+        expected = 1.0 if i % 2 == 0 else 0.0
+        assert X[i, 10] == expected
 
 
 # ── missing class handling ────────────────────────────────────────────────────
