@@ -16,6 +16,7 @@ _ALIASES: dict[str, str] = {
     "Chinese Taipei": "Taiwan",
     "Kyrgyz Republic": "Kyrgyzstan",
     "Bosnia-Herzegovina": "Bosnia and Herzegovina",
+    "Bosnia & Herzegovina": "Bosnia and Herzegovina",
     "Northern Ireland": "Northern Ireland",
     "Faroe Islands": "Faroe Islands",
 }

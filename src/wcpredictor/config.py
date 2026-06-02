@@ -41,6 +41,12 @@ DC_CAL_VALIDATION_YEARS: int = 2                   # validation slice length for
 # Ensemble
 ENSEMBLE_POOL: str = "log"                         # "log" (log-opinion) or "linear"
 
+# Market-odds blending (football-data.co.uk WC xlsx)
+FDCO_ODDS_URL: str = "https://www.football-data.co.uk/WorldCup2026.xlsx"
+# SHA-256 of WorldCup_fdco.xlsx as of 2026-05-28; verify with download_odds.py
+FDCO_ODDS_SHA256: str = "777652ce1a400aabbbb5778f306311f36197b7e382ff87d5077b5a017473ae72"
+ODDS_ALPHA_PRIOR: float = 0.0  # conservative: no market weight until time-aware data supports it
+
 # Form features
 FORM_WINDOW: int = 5                               # rolling window for recent-form features
 REST_DAYS_CAP: int = 30                            # cap on days-since-last-match

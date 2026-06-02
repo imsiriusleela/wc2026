@@ -27,9 +27,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from wcpredictor.config import DATA_PROCESSED, DC_CAL_VALIDATION_YEARS, ENSEMBLE_POOL
+from scipy.optimize import minimize_scalar
+
+from wcpredictor.config import (
+    DATA_PROCESSED,
+    DC_CAL_VALIDATION_YEARS,
+    ENSEMBLE_POOL,
+    ODDS_ALPHA_PRIOR,
+)
 from wcpredictor.data.download import download_results
+from wcpredictor.data.download_odds import download_odds
 from wcpredictor.data.load_matches import load_matches
+from wcpredictor.features.odds import align_odds_to_test, load_wc_odds
 from wcpredictor.evaluation.metrics import (
     accuracy,
     brier,
@@ -93,6 +102,23 @@ def _elo_baseline_probs(elo_diffs: list[float]) -> list[list[float]]:
     return result
 
 
+def _fit_odds_alpha(
+    labels: list[int],
+    ens_probs: list[list[float]],
+    market_probs: list[list[float]],
+) -> float:
+    """Return α ∈ [0,1] minimising log_loss of (1-α)·ens + α·market on given data."""
+    def _neg_ll(alpha: float) -> float:
+        blended = [
+            [(1 - alpha) * e[i] + alpha * m[i] for i in range(3)]
+            for e, m in zip(ens_probs, market_probs)
+        ]
+        return log_loss(labels, blended)
+
+    res = minimize_scalar(_neg_ll, bounds=(0.0, 1.0), method="bounded")
+    return float(res.x)
+
+
 def _score_model(
     labels: list[int],
     probs: list[list[float]],
@@ -123,11 +149,21 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
     from wcpredictor.config import DATA_RAW
     if not (DATA_RAW / "results.csv").exists():
         download_results()
+    if not (DATA_RAW / "WorldCup_fdco.xlsx").exists():
+        download_odds()
 
     matches = load_matches()
     elo_all, _final_ratings = compute_elo(matches)
     form_all, _ = compute_form(matches)
     elo_all = elo_all.merge(form_all, on="match_id", how="left")
+
+    # Load market odds (WC 2014/2018/2022 only; 2010 absent from source)
+    odds_df = load_wc_odds()
+
+    # Rolling collector for time-aware α fitting (no leakage)
+    prev_odds_labels: list[int] = []
+    prev_odds_ens_probs: list[list[float]] = []
+    prev_odds_market_probs: list[list[float]] = []
 
     results = {}
     for year in years:
@@ -288,6 +324,38 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
         ens_pred_b = [matrix_to_lambdas(m)[1] for m in ens_matrices]
         ens_top_sc = [matrix_to_top_scorelines(m) for m in ens_matrices]
 
+        # ── Market-odds blending (2014/2018/2022 only; 2010 absent from source) ──
+        market_probs_test = align_odds_to_test(odds_df, year, test_elo)
+        ens_market_info: dict = {}
+        ens_probs_market: list[list[float]] = []
+
+        if market_probs_test is not None:
+            # Time-aware α: use prior for 2014 (no past fold with odds), else fit on past folds
+            if not prev_odds_labels:
+                alpha_odds = ODDS_ALPHA_PRIOR
+            else:
+                alpha_odds = _fit_odds_alpha(
+                    prev_odds_labels, prev_odds_ens_probs, prev_odds_market_probs
+                )
+
+            ens_probs_market = [
+                [(1 - alpha_odds) * e[i] + alpha_odds * m[i] for i in range(3)]
+                for e, m in zip(ens_probs_cal, market_probs_test)
+            ]
+
+            ens_market_info = {
+                **_score_model(
+                    labels_dc, ens_probs_market, true_a_dc, true_b_dc,
+                    ens_pred_a, ens_pred_b, ens_matrices, ens_top_sc,
+                ),
+                "alpha_odds": round(alpha_odds, 4),
+            }
+
+            # Update rolling collector for the next fold (time-aware, no leakage)
+            prev_odds_labels.extend(labels_dc)
+            prev_odds_ens_probs.extend(ens_probs_cal)
+            prev_odds_market_probs.extend(market_probs_test)
+
         # ── Compile fold results ────────────────────────────────────────────
         fold: dict = {
             "n_matches": len(labels),
@@ -322,6 +390,7 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
                 "weights_logistic": round(float(ens_weights[2]), 4),
                 "pool": ENSEMBLE_POOL,
             },
+            **({"model_ensemble_market": ens_market_info} if ens_market_info else {}),
             "baseline_most_common": {
                 "log_loss": round(log_loss(labels, mc_probs), 4),
                 "brier": round(brier(labels, mc_probs), 4),
@@ -372,6 +441,10 @@ def _print_report(results: dict) -> None:
                   f"ECE {ensc['ece_before_val']:.3f}→{ensc['ece_after_val']:.3f}  "
                   f"w=[poi={ensc['weights_poisson']:.2f} dc={ensc['weights_dc']:.2f} "
                   f"log={ensc['weights_logistic']:.2f}]")
+        ensm = fold.get("model_ensemble_market", {})
+        if ensm:
+            print(f"  Ens+Mkt    log_loss={ensm['log_loss']:.4f}  brier={ensm['brier']:.4f}  "
+                  f"acc={ensm['accuracy']:.3f}  α={ensm['alpha_odds']:.3f}")
         print(f"  MostComm   log_loss={mc['log_loss']:.4f}  brier={mc['brier']:.4f}  "
               f"acc={mc['accuracy']:.3f}")
         print(f"  EloOnly    log_loss={elo['log_loss']:.4f}  brier={elo['brier']:.4f}  "
