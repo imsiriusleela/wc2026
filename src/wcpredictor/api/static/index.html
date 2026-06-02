@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WC 2026 Predictor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0a1628; color: #e8eaf0; min-height: 100vh; }
+    header { background: #122040; padding: 1.2rem 2rem; display: flex; align-items: center; gap: 1rem; border-bottom: 2px solid #1e3a5f; }
+    header h1 { font-size: 1.4rem; font-weight: 700; color: #f0c040; letter-spacing: 0.03em; }
+    header span { color: #7090c0; font-size: 0.9rem; }
+    main { max-width: 1100px; margin: 0 auto; padding: 2rem 1rem; display: flex; flex-direction: column; gap: 2.5rem; }
+
+    section { background: #122040; border-radius: 10px; padding: 1.5rem; border: 1px solid #1e3a5f; }
+    section h2 { font-size: 1.1rem; color: #7ab3e0; margin-bottom: 1.2rem; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; }
+
+    /* Predict panel */
+    .predict-controls { display: flex; flex-wrap: wrap; gap: 0.8rem; align-items: flex-end; margin-bottom: 1.2rem; }
+    .predict-controls label { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.82rem; color: #9ab0cc; }
+    .predict-controls select, .predict-controls input { background: #0e1f38; border: 1px solid #2a4a70; color: #e8eaf0; border-radius: 6px; padding: 0.4rem 0.7rem; font-size: 0.95rem; min-width: 160px; }
+    button#predict-btn { background: #1a5fb4; color: #fff; border: none; border-radius: 6px; padding: 0.5rem 1.4rem; font-size: 0.95rem; cursor: pointer; font-weight: 600; transition: background 0.15s; }
+    button#predict-btn:hover { background: #2470cc; }
+    button#predict-btn:disabled { background: #1a3a5a; color: #5a7090; cursor: not-allowed; }
+
+    .result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
+
+    .prob-bars { background: #0e1f38; border-radius: 8px; padding: 1rem; }
+    .prob-bars h3 { font-size: 0.8rem; color: #7090c0; margin-bottom: 0.8rem; text-transform: uppercase; }
+    .bar-row { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; font-size: 0.9rem; }
+    .bar-label { width: 42px; text-align: right; color: #9ab0cc; font-size: 0.8rem; }
+    .bar-track { flex: 1; background: #1a3050; border-radius: 4px; height: 18px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+    .bar-fill.win  { background: #22aa66; }
+    .bar-fill.draw { background: #cc8800; }
+    .bar-fill.loss { background: #cc3344; }
+    .bar-pct { width: 48px; font-size: 0.85rem; color: #c8d8ea; }
+
+    .elo-info { background: #0e1f38; border-radius: 8px; padding: 1rem; }
+    .elo-info h3 { font-size: 0.8rem; color: #7090c0; margin-bottom: 0.8rem; text-transform: uppercase; }
+    .elo-row { display: flex; justify-content: space-between; margin-bottom: 0.4rem; font-size: 0.9rem; }
+    .elo-name { color: #c8d8ea; }
+    .elo-val { color: #f0c040; font-weight: 600; }
+
+    .xg-info { background: #0e1f38; border-radius: 8px; padding: 1rem; }
+    .xg-info h3 { font-size: 0.8rem; color: #7090c0; margin-bottom: 0.8rem; text-transform: uppercase; }
+    .xg-row { display: flex; justify-content: space-between; margin-bottom: 0.4rem; font-size: 0.9rem; }
+
+    .scorelines { background: #0e1f38; border-radius: 8px; padding: 1rem; }
+    .scorelines h3 { font-size: 0.8rem; color: #7090c0; margin-bottom: 0.8rem; text-transform: uppercase; }
+    .sc-row { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.35rem; font-size: 0.88rem; }
+    .sc-score { width: 40px; text-align: center; color: #f0c040; font-weight: 600; }
+    .sc-track { flex: 1; background: #1a3050; border-radius: 3px; height: 12px; overflow: hidden; }
+    .sc-fill { height: 100%; background: #3a70b0; border-radius: 3px; }
+    .sc-pct { width: 48px; font-size: 0.82rem; color: #9ab0cc; }
+
+    /* Score matrix */
+    .matrix-wrap { overflow-x: auto; margin-top: 1rem; }
+    table.matrix { border-collapse: collapse; font-size: 0.75rem; }
+    table.matrix th { background: #1a3050; color: #7090c0; padding: 0.3rem 0.5rem; text-align: center; }
+    table.matrix td { padding: 0.25rem 0.4rem; text-align: center; border: 1px solid #1a3050; }
+    table.matrix .row-header { color: #7090c0; background: #1a3050; }
+
+    .error-msg { color: #ff6680; background: #2a1020; border: 1px solid #7a2030; border-radius: 6px; padding: 0.7rem 1rem; font-size: 0.9rem; margin-top: 0.5rem; }
+    .loading { color: #7090c0; font-style: italic; font-size: 0.9rem; margin-top: 0.5rem; }
+
+    /* Fixtures table */
+    .filter-row { display: flex; gap: 0.8rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+    .filter-row label { font-size: 0.82rem; color: #9ab0cc; display: flex; align-items: center; gap: 0.4rem; }
+    .filter-row select { background: #0e1f38; border: 1px solid #2a4a70; color: #e8eaf0; border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.88rem; }
+    .table-wrap { overflow-x: auto; }
+    table.data { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
+    table.data th { background: #1a3050; color: #7090c0; padding: 0.5rem 0.7rem; text-align: left; cursor: pointer; white-space: nowrap; user-select: none; }
+    table.data th:hover { background: #1e3870; }
+    table.data td { padding: 0.4rem 0.7rem; border-bottom: 1px solid #1a2e4a; }
+    table.data tr:hover td { background: #0e1f38; }
+    .win-col { color: #22aa66; font-weight: 600; }
+    .draw-col { color: #cc8800; font-weight: 600; }
+    .loss-col { color: #cc3344; font-weight: 600; }
+    .model-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+    .model-badge.poisson { background: #1a3050; color: #7ab3e0; }
+    .model-badge.ensemble { background: #1a4030; color: #40c090; }
+    .model-badge.ensemble_mkt { background: #3a2a00; color: #f0c040; }
+
+    /* Tournament leaderboard */
+    .sort-hint { font-size: 0.78rem; color: #556080; margin-bottom: 0.7rem; }
+    table.data .team-name { color: #e8eaf0; font-weight: 500; }
+    table.data .group-col { color: #7090c0; }
+    table.data .champ-col { color: #f0c040; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⚽ WC 2026 Predictor</h1>
+    <span>Match predictions · Tournament simulation</span>
+  </header>
+  <main>
+
+    <!-- Predict Panel -->
+    <section id="predict-section">
+      <h2>Match Predictor</h2>
+      <div class="predict-controls">
+        <label>Team A
+          <select id="team-a-sel"><option value="">Loading…</option></select>
+        </label>
+        <label>Team B
+          <select id="team-b-sel"><option value="">Loading…</option></select>
+        </label>
+        <label>Model
+          <select id="model-sel">
+            <option value="poisson">Poisson (fast)</option>
+            <option value="ensemble">Ensemble</option>
+            <option value="ensemble_mkt">Ensemble + Market</option>
+            <option value="dixon_coles">Dixon-Coles</option>
+          </select>
+        </label>
+        <label style="flex-direction:row;align-items:center;gap:0.4rem;">
+          <input type="checkbox" id="neutral-cb" checked> Neutral venue
+        </label>
+        <button id="predict-btn">Predict</button>
+      </div>
+      <div id="predict-result"></div>
+    </section>
+
+    <!-- Fixtures Table -->
+    <section id="fixtures-section">
+      <h2>WC 2026 Fixture Predictions</h2>
+      <div class="filter-row">
+        <label>Model
+          <select id="fixtures-model-sel">
+            <option value="">All</option>
+            <option value="poisson">Poisson</option>
+            <option value="ensemble">Ensemble</option>
+            <option value="ensemble_mkt">Ensemble + Market</option>
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap"><table class="data" id="fixtures-table">
+        <thead><tr>
+          <th data-col="date">Date ▾</th>
+          <th data-col="team_a">Team A</th>
+          <th data-col="team_b">Team B</th>
+          <th data-col="model">Model</th>
+          <th data-col="p_win">Win %</th>
+          <th data-col="p_draw">Draw %</th>
+          <th data-col="p_loss">Loss %</th>
+          <th data-col="lambda_a">xG A</th>
+          <th data-col="lambda_b">xG B</th>
+          <th data-col="elo_a">Elo A</th>
+          <th data-col="elo_b">Elo B</th>
+        </tr></thead>
+        <tbody id="fixtures-tbody"><tr><td colspan="11" style="color:#556080;padding:1rem;">Loading…</td></tr></tbody>
+      </table></div>
+    </section>
+
+    <!-- Tournament Leaderboard -->
+    <section id="tournament-section">
+      <h2>Tournament Simulation</h2>
+      <p class="sort-hint">Click a column header to sort. Click again to reverse.</p>
+      <div class="table-wrap"><table class="data" id="tournament-table">
+        <thead><tr>
+          <th data-col="team">Team</th>
+          <th data-col="group">Group</th>
+          <th data-col="p_champion">Champion %</th>
+          <th data-col="p_final">Final %</th>
+          <th data-col="p_sf">Semi-final %</th>
+          <th data-col="p_qf">Quarter-final %</th>
+          <th data-col="p_r16">R16 %</th>
+          <th data-col="p_r32">R32 %</th>
+          <th data-col="p_win_group">Win group %</th>
+        </tr></thead>
+        <tbody id="tournament-tbody"><tr><td colspan="9" style="color:#556080;padding:1rem;">Loading…</td></tr></tbody>
+      </table></div>
+    </section>
+
+  </main>
+
+  <script>
+  // ---- Utility ----
+  const pct = v => v == null ? '—' : (v * 100).toFixed(1) + '%';
+  const fmt2 = v => v == null ? '—' : v.toFixed(2);
+  const elo_fmt = v => v == null ? '—' : Math.round(v);
+
+  function heatColor(v, maxV) {
+    const ratio = Math.min(1, v / (maxV || 1));
+    const r = Math.round(10 + ratio * 80);
+    const g = Math.round(20 + ratio * 90);
+    const b = Math.round(50 + ratio * 50);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function buildMatrix(matrix, teamA, teamB) {
+    if (!matrix || !matrix.length) return '';
+    const n = matrix.length;
+    const maxV = Math.max(...matrix.flat());
+    let html = '<div class="matrix-wrap"><table class="matrix"><thead><tr><th>' +
+      teamB + ' →</th>';
+    for (let j = 0; j < n; j++) html += `<th>${j}</th>`;
+    html += '</tr></thead><tbody>';
+    for (let i = 0; i < n; i++) {
+      html += `<tr><td class="row-header">${teamA} ${i}</td>`;
+      for (let j = 0; j < n; j++) {
+        const v = matrix[i][j];
+        const bg = heatColor(v, maxV);
+        html += `<td style="background:${bg}">${(v * 100).toFixed(1)}%</td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  // ---- Teams dropdown ----
+  async function loadTeams() {
+    const resp = await fetch('/teams');
+    const teams = await resp.json();
+    const opts = teams.map(t => `<option value="${t}">${t}</option>`).join('');
+    document.getElementById('team-a-sel').innerHTML = opts;
+    document.getElementById('team-b-sel').innerHTML = opts;
+    // Default B to Argentina
+    const selB = document.getElementById('team-b-sel');
+    const argIdx = teams.indexOf('Argentina');
+    if (argIdx >= 0) selB.selectedIndex = argIdx;
+    const selA = document.getElementById('team-a-sel');
+    const braIdx = teams.indexOf('Brazil');
+    if (braIdx >= 0) selA.selectedIndex = braIdx;
+  }
+
+  // ---- Predict ----
+  document.getElementById('predict-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('predict-btn');
+    const out = document.getElementById('predict-result');
+    const teamA = document.getElementById('team-a-sel').value;
+    const teamB = document.getElementById('team-b-sel').value;
+    const model = document.getElementById('model-sel').value;
+    const neutral = document.getElementById('neutral-cb').checked;
+
+    if (!teamA || !teamB) { out.innerHTML = '<p class="error-msg">Select both teams.</p>'; return; }
+    if (teamA === teamB) { out.innerHTML = '<p class="error-msg">Teams must differ.</p>'; return; }
+
+    btn.disabled = true;
+    out.innerHTML = '<p class="loading">Predicting…</p>';
+
+    const url = `/predict?team_a=${encodeURIComponent(teamA)}&team_b=${encodeURIComponent(teamB)}&model=${model}&neutral=${neutral}`;
+    try {
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (!resp.ok) {
+        out.innerHTML = `<p class="error-msg">${data.detail || resp.statusText}</p>`;
+        return;
+      }
+      renderPredict(data);
+    } catch (e) {
+      out.innerHTML = `<p class="error-msg">Error: ${e.message}</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  function renderPredict(d) {
+    const maxSc = d.top_scorelines.length ? Math.max(...d.top_scorelines.map(s => s.prob)) : 1;
+    const scRows = d.top_scorelines.map(s => `
+      <div class="sc-row">
+        <span class="sc-score">${s.goals_a}-${s.goals_b}</span>
+        <div class="sc-track"><div class="sc-fill" style="width:${(s.prob/maxSc*100).toFixed(1)}%"></div></div>
+        <span class="sc-pct">${(s.prob*100).toFixed(1)}%</span>
+      </div>`).join('');
+
+    document.getElementById('predict-result').innerHTML = `
+      <div class="result-grid">
+        <div class="prob-bars">
+          <h3>${d.team_a} win / draw / ${d.team_b} win</h3>
+          <div class="bar-row">
+            <span class="bar-label">Win</span>
+            <div class="bar-track"><div class="bar-fill win" style="width:${(d.p_win*100).toFixed(1)}%"></div></div>
+            <span class="bar-pct">${(d.p_win*100).toFixed(1)}%</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-label">Draw</span>
+            <div class="bar-track"><div class="bar-fill draw" style="width:${(d.p_draw*100).toFixed(1)}%"></div></div>
+            <span class="bar-pct">${(d.p_draw*100).toFixed(1)}%</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-label">Loss</span>
+            <div class="bar-track"><div class="bar-fill loss" style="width:${(d.p_loss*100).toFixed(1)}%"></div></div>
+            <span class="bar-pct">${(d.p_loss*100).toFixed(1)}%</span>
+          </div>
+          <p style="margin-top:0.7rem;font-size:0.75rem;color:#556080;">Model: ${d.model_version}</p>
+        </div>
+        <div class="xg-info">
+          <h3>Expected Goals</h3>
+          <div class="xg-row"><span class="elo-name">${d.team_a}</span><span class="elo-val">${fmt2(d.lambda_a)}</span></div>
+          <div class="xg-row"><span class="elo-name">${d.team_b}</span><span class="elo-val">${fmt2(d.lambda_b)}</span></div>
+        </div>
+        <div class="elo-info">
+          <h3>Elo Ratings</h3>
+          <div class="elo-row"><span class="elo-name">${d.team_a}</span><span class="elo-val">${elo_fmt(d.elo_a)}</span></div>
+          <div class="elo-row"><span class="elo-name">${d.team_b}</span><span class="elo-val">${elo_fmt(d.elo_b)}</span></div>
+        </div>
+        <div class="scorelines">
+          <h3>Top scorelines</h3>
+          ${scRows}
+        </div>
+      </div>
+      ${buildMatrix(d.score_matrix, d.team_a, d.team_b)}
+    `;
+  }
+
+  // ---- Fixtures ----
+  let _fixturesData = [];
+  let _fixturesSortCol = 'date';
+  let _fixturesSortAsc = true;
+
+  async function loadFixtures() {
+    const resp = await fetch('/fixtures');
+    _fixturesData = await resp.json();
+    renderFixtures();
+  }
+
+  function renderFixtures() {
+    const modelFilter = document.getElementById('fixtures-model-sel').value;
+    let rows = _fixturesData.filter(r => !modelFilter || r.model === modelFilter);
+
+    rows.sort((a, b) => {
+      let va = a[_fixturesSortCol], vb = b[_fixturesSortCol];
+      if (typeof va === 'string') va = va.toLowerCase(), vb = (vb||'').toLowerCase();
+      if (va < vb) return _fixturesSortAsc ? -1 : 1;
+      if (va > vb) return _fixturesSortAsc ? 1 : -1;
+      return 0;
+    });
+
+    const modelBadge = m => {
+      const cls = m.replace(/_/g, '_');
+      return `<span class="model-badge ${cls}">${m}</span>`;
+    };
+
+    const html = rows.map(r => `<tr>
+      <td>${r.date}</td>
+      <td>${r.team_a}</td>
+      <td>${r.team_b}</td>
+      <td>${modelBadge(r.model)}</td>
+      <td class="win-col">${pct(r.p_win)}</td>
+      <td class="draw-col">${pct(r.p_draw)}</td>
+      <td class="loss-col">${pct(r.p_loss)}</td>
+      <td>${fmt2(r.lambda_a)}</td>
+      <td>${fmt2(r.lambda_b)}</td>
+      <td>${elo_fmt(r.elo_a)}</td>
+      <td>${elo_fmt(r.elo_b)}</td>
+    </tr>`).join('');
+
+    document.getElementById('fixtures-tbody').innerHTML = html || '<tr><td colspan="11" style="color:#556080">No data.</td></tr>';
+  }
+
+  document.getElementById('fixtures-model-sel').addEventListener('change', renderFixtures);
+
+  document.querySelectorAll('#fixtures-table th').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (_fixturesSortCol === col) _fixturesSortAsc = !_fixturesSortAsc;
+      else { _fixturesSortCol = col; _fixturesSortAsc = true; }
+      renderFixtures();
+    });
+  });
+
+  // ---- Tournament ----
+  let _tournamentData = [];
+  let _tournSortCol = 'p_champion';
+  let _tournSortAsc = false;
+
+  async function loadTournament() {
+    const resp = await fetch('/tournament');
+    const data = await resp.json();
+    _tournamentData = data.standings;
+    renderTournament();
+  }
+
+  function renderTournament() {
+    let rows = [..._tournamentData];
+    rows.sort((a, b) => {
+      let va = a[_tournSortCol], vb = b[_tournSortCol];
+      if (typeof va === 'string') va = va.toLowerCase(), vb = (vb||'').toLowerCase();
+      if (va < vb) return _tournSortAsc ? -1 : 1;
+      if (va > vb) return _tournSortAsc ? 1 : -1;
+      return 0;
+    });
+
+    const html = rows.map(r => `<tr>
+      <td class="team-name">${r.team}</td>
+      <td class="group-col">${r.group}</td>
+      <td class="champ-col">${pct(r.p_champion)}</td>
+      <td>${pct(r.p_final)}</td>
+      <td>${pct(r.p_sf)}</td>
+      <td>${pct(r.p_qf)}</td>
+      <td>${pct(r.p_r16)}</td>
+      <td>${pct(r.p_r32)}</td>
+      <td>${pct(r.p_win_group)}</td>
+    </tr>`).join('');
+
+    document.getElementById('tournament-tbody').innerHTML = html || '<tr><td colspan="9" style="color:#556080">No data.</td></tr>';
+  }
+
+  document.querySelectorAll('#tournament-table th').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (_tournSortCol === col) _tournSortAsc = !_tournSortAsc;
+      else { _tournSortCol = col; _tournSortAsc = false; }
+      renderTournament();
+    });
+  });
+
+  // ---- Boot ----
+  loadTeams();
+  loadFixtures();
+  loadTournament();
+  </script>
+</body>
+</html>

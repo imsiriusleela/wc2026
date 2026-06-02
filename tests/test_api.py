@@ -1,0 +1,71 @@
+"""FastAPI endpoint tests using TestClient (poisson-only for speed)."""
+import pytest
+from fastapi.testclient import TestClient
+
+from wcpredictor.api.app import app
+
+client = TestClient(app)
+
+
+def test_health():
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_teams_non_empty():
+    resp = client.get("/teams")
+    assert resp.status_code == 200
+    teams = resp.json()
+    assert isinstance(teams, list)
+    assert len(teams) > 0
+    assert "Brazil" in teams
+
+
+def test_predict_valid_pair():
+    resp = client.get("/predict", params={"team_a": "Brazil", "team_b": "Argentina", "model": "poisson"})
+    assert resp.status_code == 200
+    d = resp.json()
+    assert abs(d["p_win"] + d["p_draw"] + d["p_loss"] - 1.0) < 1e-4
+    assert isinstance(d["score_matrix"], list)
+    assert len(d["score_matrix"]) > 0
+    assert isinstance(d["score_matrix"][0], list)
+    assert len(d["top_scorelines"]) > 0
+
+
+def test_predict_unknown_team_returns_422():
+    resp = client.get("/predict", params={"team_a": "XyzUnknownFC", "team_b": "Brazil", "model": "poisson"})
+    assert resp.status_code == 422
+
+
+def test_fixtures_non_empty():
+    resp = client.get("/fixtures")
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) > 0
+    for row in rows[:3]:
+        assert isinstance(row["score_matrix"], list)
+        assert isinstance(row["top_scorelines"], list)
+
+
+def test_fixtures_model_filter():
+    resp = client.get("/fixtures", params={"model": "poisson"})
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert all(r["model"] == "poisson" for r in rows)
+
+
+def test_tournament_all_teams():
+    resp = client.get("/tournament")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["standings"]) == 48
+    champ_sum = sum(s["p_champion"] for s in data["standings"])
+    assert abs(champ_sum - 1.0) < 0.01
+
+
+def test_tournament_top10_present():
+    resp = client.get("/tournament")
+    data = resp.json()
+    assert len(data["top10_champion"]) > 0
+    assert "team" in data["top10_champion"][0]
