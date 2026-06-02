@@ -503,6 +503,15 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
         }
         results[str(year)] = fold
 
+    # Pooled α across all four WCs — best transfer estimate for 2026
+    if prev_odds_labels:
+        odds_alpha_pooled = float(_fit_odds_alpha(
+            prev_odds_labels, prev_odds_ens_probs, prev_odds_market_probs
+        ))
+    else:
+        odds_alpha_pooled = float(ODDS_ALPHA_PRIOR)
+    results["odds_alpha_pooled"] = round(odds_alpha_pooled, 4)
+
     return results
 
 
