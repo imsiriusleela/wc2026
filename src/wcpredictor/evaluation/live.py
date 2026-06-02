@@ -84,15 +84,23 @@ def _load_latest_results(results_csv: Path | None = None) -> pd.DataFrame:
 
 
 def _load_predictions() -> pd.DataFrame:
-    """Concatenate all wc2026_predictions_*.csv files in data/processed/."""
+    """Concatenate all wc2026_predictions_*.csv files in data/processed/.
+
+    If a `model` column is present, deduplication is per (team_a, team_b, date, model)
+    so multiple models can coexist in the same file.  Old CSVs without a `model`
+    column are tagged as "unknown" for backward compatibility.
+    """
     files = sorted(DATA_PROCESSED.glob("wc2026_predictions_*.csv"))
     if not files:
         return pd.DataFrame()
     frames = [pd.read_csv(f, parse_dates=["date"]) for f in files]
     combined = pd.concat(frames, ignore_index=True)
-    # Keep the earliest prediction per (team_a, team_b, date)
+    if "model" not in combined.columns:
+        combined["model"] = "unknown"
+    else:
+        combined["model"] = combined["model"].fillna("unknown")
     combined = combined.sort_values("date").drop_duplicates(
-        subset=["team_a", "team_b", "date"], keep="first"
+        subset=["team_a", "team_b", "date", "model"], keep="first"
     )
     return combined
 
@@ -170,6 +178,7 @@ def score_completed_matches(
             "p_win": _safe_prob(pred.get("p_win")),
             "p_draw": _safe_prob(pred.get("p_draw")),
             "p_loss": _safe_prob(pred.get("p_loss")),
+            "model": str(pred.get("model", "unknown")),
         })
 
     return matched
@@ -195,46 +204,71 @@ def run_refresh(
 
     completed = score_completed_matches(predictions, results, as_of_date)
 
-    scorecard: dict = {
-        "as_of_date": as_of_date,
-        "n_completed": len(completed),
-        "log_loss": None,
-        "brier": None,
-        "accuracy": None,
-        "ece_uncal": None,
-        "ece_cal": None,
-        "temperature": 1.0,
-        "matches": completed,
-    }
-
-    if completed:
-        labels = [m["label"] for m in completed]
-        probs = [[m["p_win"], m["p_draw"], m["p_loss"]] for m in completed]
+    def _score_group(group: list[dict]) -> dict:
+        """Compute metrics for a list of matched predictions."""
+        if not group:
+            return {
+                "n": 0, "log_loss": None, "brier": None,
+                "accuracy": None, "ece_uncal": None, "ece_cal": None,
+                "temperature": 1.0,
+            }
+        labels = [m["label"] for m in group]
+        probs = [[m["p_win"], m["p_draw"], m["p_loss"]] for m in group]
         y_pred = [int(np.argmax(p)) for p in probs]
-
         T = fit_temperature(labels, probs)
         probs_cal = cal_apply(probs, T)
-
-        scorecard.update({
+        return {
+            "n": len(group),
             "log_loss": round(log_loss(labels, probs), 4),
             "brier": round(brier(labels, probs), 4),
             "accuracy": round(accuracy(labels, y_pred), 4),
             "ece_uncal": round(expected_calibration_error(labels, probs), 4),
             "ece_cal": round(expected_calibration_error(labels, probs_cal), 4),
             "temperature": round(float(T), 4),
-        })
+        }
+
+    # Build per-model scorecard blocks
+    models_seen = sorted({m["model"] for m in completed}) if completed else []
+    per_model: dict[str, dict] = {}
+    for model_name in models_seen:
+        group = [m for m in completed if m["model"] == model_name]
+        per_model[model_name] = _score_group(group)
+
+    # Overall (all models aggregated) — kept for backward compat
+    overall = _score_group(completed)
+
+    scorecard: dict = {
+        "as_of_date": as_of_date,
+        "n_completed": len(completed),
+        "log_loss": overall["log_loss"],
+        "brier": overall["brier"],
+        "accuracy": overall["accuracy"],
+        "ece_uncal": overall["ece_uncal"],
+        "ece_cal": overall["ece_cal"],
+        "temperature": overall["temperature"],
+        "models": per_model,
+        "matches": completed,
+    }
 
     DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
     scorecard_out = DATA_PROCESSED / "wc2026_scorecard.json"
     scorecard_out.write_text(json.dumps(scorecard, indent=2))
     print(f"Scorecard written → {scorecard_out}")
-    print(
-        f"n_completed={scorecard['n_completed']}  "
-        f"log_loss={scorecard['log_loss']}  "
-        f"brier={scorecard['brier']}  "
-        f"accuracy={scorecard['accuracy']}  "
-        f"T={scorecard['temperature']}"
-    )
+    if per_model:
+        for mn, stats in per_model.items():
+            print(
+                f"  [{mn}] n={stats['n']}  log_loss={stats['log_loss']}  "
+                f"brier={stats['brier']}  accuracy={stats['accuracy']}  "
+                f"T={stats['temperature']}"
+            )
+    else:
+        print(
+            f"n_completed={scorecard['n_completed']}  "
+            f"log_loss={scorecard['log_loss']}  "
+            f"brier={scorecard['brier']}  "
+            f"accuracy={scorecard['accuracy']}  "
+            f"T={scorecard['temperature']}"
+        )
     return scorecard
 
 

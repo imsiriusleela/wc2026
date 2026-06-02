@@ -1,92 +1,148 @@
-# HANDOFF — Phase 3.8 complete / next phase TBD
+# HANDOFF — Phase 4.0: `ensemble_mkt` model (market-odds output blend)
 
-> Completed 2026-06-02. Phase 3.8 weight-fitting fix implemented and gated.
-> Result: GBM weights remain ≈0.25 — odds edge is not consistently strong across past WCs.
-> Gate still fails 2010/2014/2022. 2018 continues to pass. Next steps below.
+> Planned 2026-06-02. Phase 3.9 is implemented but **uncommitted**. Next execution session:
+> commit Phase 3.9, then wire the `ensemble_mkt` member into the live prediction path.
 
-## What was done (Phase 3.8)
+## Goal
 
-**Goal**: Fix the weight-fitting blind spot so the GBM's odds signal could earn ensemble weight.
+Add the **`ensemble_mkt`** model to the live prediction path so
+`predict_fixtures(..., models=['ensemble_mkt'])` works. `ensemble_mkt` blends the calibrated
+ensemble W/D/L with market-implied probabilities at the output layer:
 
-**Change**: Replaced the non-WC validation slice (which had zero odds-bearing rows) with a
-walk-forward WC stacking validation for `ens_fit_weights`. For fold year Y, fits all four
-members on data `< wc_start(w)` for each past WC `w < Y`, predicts WC `w` (odds-bearing),
-and concatenates. Falls back to non-WC slice / equal weights for 2010 (no prior WC).
+```
+p_final = normalize( (1-α)·p_ensemble_cal + α·p_market )    # W/D/L vector only
+```
 
-**Files changed (committed `b1c7e9b`)**:
-- `src/wcpredictor/evaluation/backtest.py` — `build_wc_stacking_validation` + wired into fold loop
-- `src/wcpredictor/predict.py` — mirrored: `predict_match("ensemble")` uses same WC stacking val
-- `tests/test_backtest_time_safety.py` — 4 new tests (structural, leakage-safe monkeypatch,
-  fit_weights dominance)
+α is fitted on historical WC odds. The exact-score matrix / lambdas / top scorelines are
+carried over unchanged from the ensemble (market odds constrain 1X2 only, not the scoreline).
 
-**Tests**: 129 passed / 1 skipped (all green).
+## Relevant context and constraints
 
-## Gate results (Phase 3.8)
+- Today is 2026-06-02; kickoff 2026-06-11. The **WC2026 odds sheet is not yet published**
+  (`WorldCup2026` tab of the fdco xlsx, expected ~2026-06-09). So for live 2026 fixtures
+  `ensemble_mkt` falls back to the plain ensemble until odds land — it is safe to build/ship
+  now and regenerate predictions later.
+- The blend math already exists and is validated in the backtest — this phase only wires it
+  into `predict.py`'s frozen-state path. **Do not invent new blending logic.**
+- Suite is currently green: `uv run pytest -q` → **135 passed / 1 skipped** (469s).
+- WC2026 format in `data/raw/wc2026_fixtures.csv` = 48 teams / 12 groups of 4 / 72 group
+  matches. Knockouts and tournament simulator remain deferred (separate future phases).
 
-| Fold | Best single model (LL) | Ens+Cal (LL) | Ens+Mkt (LL) | Gate |
-|------|------------------------|--------------|--------------|------|
-| 2010 | DC+Cal  0.9474 | 0.9645 | 0.9645 (α=0.000) | FAIL |
-| 2014 | Poisson 0.9152 | 0.9210 | 0.9210 (α=0.046) | FAIL |
-| 2018 | Poisson 0.9690 | 0.9564 | 0.9552 (α=0.041) | PASS |
-| 2022 | Poisson 1.0541 | 1.0681 | 1.0366 (α=0.254) | FAIL |
+## Files inspected
 
-Weights for all folds (after fix): ≈[poi=0.25, dc=0.25, log=0.25, tree=0.25].
+- `src/wcpredictor/predict.py` — `_build_frozen_state` (271), `_predict_one_frozen` (406),
+  `predict_fixtures` (514). Ensemble state built at 311-400; 2026 `odds_lookup` already built
+  at 334-341; ensemble predict branch at 437-497.
+- `src/wcpredictor/evaluation/backtest.py` — `_fit_odds_alpha` (108); rolling α collectors
+  `prev_odds_*` (241-243, extended 451-453); four-fold market-blend loop (423-453);
+  time-aware α with `ODDS_ALPHA_PRIOR` fallback (430-435).
+- `src/wcpredictor/features/odds.py` — `align_odds_to_test` (190), symmetric (a,b)/(b,a) lookup.
+- `src/wcpredictor/config.py` — `ENSEMBLE_POOL="log"` (42), `FDCO_ODDS_SHA256` (47),
+  `ODDS_ALPHA_PRIOR=0.0` (48).
 
-**Root cause of ≈0.25 weights**: The GBM's odds-informed edge is not consistently dominant
-across past WCs (2010 betexplorer odds are low-signal; 2014 only has WC2010 as val — 64
-matches with L2 prior). The equal-weight L2 prior absorbs the small per-WC signal. This is
-the documented risk from the previous HANDOFF and is a clean result, not a bug.
+## Current findings
 
-## Key findings / current state
+- α should be the **pooled weight fit on all four past WCs (2010/14/18/22)** — the right
+  transfer estimate for 2026, since all folds precede the 2026 cutoff. The backtest's fold loop
+  already accumulates the needed `(labels, ens_cal_probs, market_probs)` triples; fitting
+  `_fit_odds_alpha` on the full accumulator after the loop yields the pooled α.
+- `_predict_one_frozen`'s ensemble branch already produces `combined_cal` (calibrated W/D/L)
+  and `mat`/lambdas/top scorelines — `ensemble_mkt` reuses this path and only post-blends the
+  W/D/L when the fixture has odds.
+- 2026 `odds_lookup` is already constructed in `_build_frozen_state` and populated only when
+  the `WorldCup2026` sheet exists — so the no-odds fallback is automatic.
 
-- **Ens+Mkt is the primary odds mechanism** (output-layer blending, not weight-fitting):
-  - 2022 improved dramatically: 1.0681 → 1.0366 (α=0.254), now beats Poisson (1.0541)
-  - 2018: 0.9564 → 0.9552 (α=0.041), marginal improvement
-  - 2014: 0.9210 → 0.9210 (α=0.046), effectively zero
-  - 2010: 0.9645 → 0.9645 (α=0.000), no odds signal (prior fold)
-- **Gate still requires all-four-folds**: 2010 and 2014 are structurally hard regardless of odds.
-- **Part B (live pipeline)**: fdco `WorldCup2026` sheet not yet fetched locally. `download_wc2026.py`
-  exists but `wc2026_fixtures.csv` not yet written. Sheet IS published per user.
+## Proposed implementation plan
 
-## Possible next directions (user's call)
+1. **`backtest.py` — expose pooled α.** After the fold loop, fit one
+   `_fit_odds_alpha(prev_odds_labels, prev_odds_ens_probs, prev_odds_market_probs)` (guard the
+   empty case → `ODDS_ALPHA_PRIOR`) and add `odds_alpha_pooled` to the returned `results` dict.
+   Persist it to `data/processed/backtest_report.json` where the report is written.
 
-**Option A — Loosen gate for 2010/2014 (not recommended without user approval)**
-- 2010 and 2014 may be fundamentally hard epochs; ensemble not expected to beat DC+Cal/Poisson there.
-- Current gate is an absolute rule; loosen only if user explicitly reopens it.
+2. **`_build_frozen_state` — resolve α once.** Make `ensemble_mkt` imply the `ensemble` state
+   (extend the `needs_*` / `"ensemble" in models` guards to also fire on `ensemble_mkt`). Store
+   `state["odds_alpha"]`: read `odds_alpha_pooled` from `backtest_report.json` if present;
+   otherwise compute via the backtest helper. Reuse the existing `odds_lookup`.
 
-**Option B — Alternative ensemble target: Ens+Mkt instead of Ens+Cal**
-- For 2022 and 2018 (WC years with good odds), the Ens+Mkt beats best single model.
-- Gate could be redefined as "Ens+Mkt beats best single model on folds where odds available".
-- This would be a cleaner framing: odds improve things when odds are reliable.
+3. **`_predict_one_frozen` — add `ensemble_mkt` branch.** Refactor so the ensemble computation
+   runs for `model_name in {"ensemble","ensemble_mkt"}`. Then if `model_name == "ensemble_mkt"`
+   and the fixture has odds (`odds_entry`/`has_odds==1.0`): blend `p_win/p_draw/p_loss` with
+   `state["odds_alpha"]` against `(odds_pw, odds_pd, odds_pl)`, renormalize, round to 6; keep
+   `score_matrix`/`lambda_a/b`/`top_scorelines` from the ensemble. No odds → plain ensemble
+   probs (α=0). Set `model_version="ensemble_mkt-0.1"`, `model="ensemble_mkt"`.
 
-**Option C — Investigate why 2014 Ens+Cal regresses vs Poisson**
-- Poisson (0.9152) beats Ensemble (0.9210) on 2014 — Poisson is actually the strongest member.
-- The ensemble dilutes Poisson by blending it with DC (weaker on 2014), logistic, and tree.
-- May need a more aggressive L1/sparsity prior or per-fold minimum-weight enforcement.
+4. **`predict_fixtures` signature.** Add `"ensemble_mkt"` to the `model: Literal[...]`
+   annotation (line 517). The `models=` list path already passes names through.
 
-**Option D — Part B: activate live pipeline**
-- Re-fetch fdco WC2026 sheet via `download_wc2026.py`
-- Or receive `wc2026_fixtures.csv` from user's hermes agent
-- Run `live.py:run_refresh` → `wc2026_scorecard.json`
-- This produces live predictions regardless of gate status
+5. **Tests (`tests/test_wc2026.py`).**
+   - `ensemble_mkt` probs sum to 1.0, all in [0,1].
+   - No 2026 odds → `ensemble_mkt` W/D/L == `ensemble` W/D/L.
+   - Synthetic 2026 odds injected into `odds_lookup` → blended probs move toward the market
+     vector by exactly the stored α (use a small fixed α).
+   - `predict_fixtures(models=['poisson','ensemble','ensemble_mkt'])` → 3× rows, correct
+     `model` tags, 0 non-summing rows.
+   - α ∈ [0,1].
 
-**Option E — Feature engineering to make GBM distinct**
-- GBM currently uses same Elo/form features as logistic → small signal gap
-- Interaction features, momentum decay, head-to-head recency might differentiate it
-- More likely to earn non-trivial weight once it's genuinely complementary to Poisson/DC
+## Exact next steps
+
+1. Verify green (already confirmed) and **commit Phase 3.9** (the 4 modified files:
+   `HANDOFF.md`, `src/wcpredictor/evaluation/live.py`, `src/wcpredictor/predict.py`,
+   `tests/test_wc2026.py`) — clean base before new work.
+2. Implement steps 1-5 above.
+3. Run verification (below); commit Phase 4.0.
+4. (Deferred, ~2026-06-09) When the `WorldCup2026` sheet publishes: update
+   `config.FDCO_ODDS_SHA256` with the new hash, then regenerate with
+   `predict_fixtures('2026-06-10', models=['poisson','ensemble','ensemble_mkt'])`.
+
+## Verification / test commands
+
+```bash
+uv run pytest -q                                      # expect 135 + new tests pass
+uv run pytest -q tests/test_wc2026.py -k "mkt or ensemble"
+
+# pooled α is exposed and sane
+uv run python -c "from wcpredictor.evaluation.backtest import backtest_world_cups as b; print('alpha_pooled=', b()['odds_alpha_pooled'])"
+
+# live path runs end-to-end (no 2026 odds yet → ensemble_mkt == ensemble)
+uv run python -c "
+from wcpredictor.predict import predict_fixtures
+import numpy as np
+df = predict_fixtures('2026-06-10', models=['poisson','ensemble','ensemble_mkt'])
+print(df['model'].value_counts())
+s = df[['p_win','p_draw','p_loss']].sum(axis=1)
+print('bad rows:', int((np.abs(s-1)>1e-6).sum()))
+print(df.groupby('model')[['p_win','p_draw','p_loss']].mean().round(3))
+"
+```
+Expect: 3 models × 72 rows, 0 bad rows, and (pre-odds) `ensemble_mkt` means ≈ `ensemble` means.
+
+## Risks and open questions
+
+- **α transfer mismatch**: pooled α is fit on the backtest's ensemble, which shares code with
+  the live frozen ensemble but isn't byte-identical. Accepted — same code path, correct regime.
+- **Degenerate fit**: if the pooled fit is empty/degenerate, α falls back to `ODDS_ALPHA_PRIOR`
+  (0.0) → `ensemble_mkt` collapses to `ensemble`. Safe.
+- **Cost**: prefer reading `odds_alpha_pooled` from `backtest_report.json` over re-running the
+  multi-minute backtest at predict time; recompute only if the field is absent.
+- **Odds timing**: 2026 `ensemble_mkt` is inert until the `WorldCup2026` sheet lands (~06-09).
 
 ## What not to repeat
 
-- **Output-layer odds blending (Phase 3.4)** — failed the gate at every α (before Ens+Mkt was tuned).
-- **Zero-filling missing odds in GBM** — destroys the "no odds" signal.
-- **Plain GBM on Elo/form only (Phase 3.5)** — 0.25 weights, no signal.
-- **Non-WC validation for weight fitting** — the Phase 3.8 blind spot; now fixed.
-- **Loosening the gate without explicit user approval.**
+- Don't add a 4th ensemble member or refit stacking weights — `ensemble_mkt` is a thin
+  **output-layer** blend over the existing ensemble.
+- Don't re-run the full backtest per fixture — α is resolved once into frozen state.
+- Don't blend the score matrix with market 1X2 — odds inform W/D/L only.
+- **72× model refits** — always use `predict_fixtures(models=[...])` for batch work, never the
+  per-fixture `predict_match` loop.
+- Don't loosen the modelling gate; don't use non-WC validation for ensemble weight fitting.
 
-## Verification commands
+---
 
-```bash
-uv run pytest -q                                # 129 passed / 1 skipped
-uv run python -m wcpredictor.evaluation.backtest  # gate; weights per fold
-uv run python -m wcpredictor.data.download_wc2026  # (Part B) fetch WC2026 sheet
-```
+## Deferred (future phases, unchanged)
+- **Knockout fixtures** — after group stage (2026-06-27): standings → R32 bracket → predict.
+  Needs extra-time/penalty resolver.
+- **Tournament simulator** — Monte Carlo over groups + knockout; per-team win-cup probs.
+  Reuses `_build_frozen_state` / `_predict_one_frozen`.
+- **Matchday loop** — `uv run python -m wcpredictor.evaluation.live --as-of <next-day>` after
+  each matchday (first real results 2026-06-11); per-model scorecard in
+  `data/processed/wc2026_scorecard.json`.
