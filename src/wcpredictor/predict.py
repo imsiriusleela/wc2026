@@ -146,9 +146,26 @@ def predict_match(
             if len(val_elo) > 0 else []
         )
 
-        # Fit ensemble weights on validation predictions
-        if val_labels_e:
-            member_val = [val_p_poi, val_p_dc, val_p_log, val_p_tree]
+        # Fit ensemble weights on odds-bearing WC stacking validation (regime-matched)
+        from wcpredictor.evaluation.backtest import (
+            build_wc_stacking_validation,
+            _WC_START,
+        )
+        # Effective fold year: one past the latest WC whose start is before cutoff
+        past_wcs = [w for w, s in _WC_START.items() if pd.Timestamp(s) < cutoff]
+        eff_year = max(past_wcs) + 1 if past_wcs else min(_WC_START)
+        wc_val_labels, wc_val_member_probs = build_wc_stacking_validation(
+            eff_year, train, elo_df
+        )
+        member_val = [val_p_poi, val_p_dc, val_p_log, val_p_tree]
+        if wc_val_labels:
+            ens_weights = ens_fit_weights(wc_val_member_probs, wc_val_labels, pool=ENSEMBLE_POOL)
+            if val_labels_e:
+                val_ens = ens_combine_probs(member_val, ens_weights, pool=ENSEMBLE_POOL)
+                T_ens = fit_temperature(val_labels_e, val_ens)
+            else:
+                T_ens = 1.0
+        elif val_labels_e:
             ens_weights = ens_fit_weights(member_val, val_labels_e, pool=ENSEMBLE_POOL)
             val_ens = ens_combine_probs(member_val, ens_weights, pool=ENSEMBLE_POOL)
             T_ens = fit_temperature(val_labels_e, val_ens)

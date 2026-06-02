@@ -122,6 +122,75 @@ def _fit_odds_alpha(
     return float(res.x)
 
 
+def build_wc_stacking_validation(
+    year: int,
+    matches: pd.DataFrame,
+    elo_all: pd.DataFrame,
+) -> tuple[list[int], list[list[list[float]]]]:
+    """Walk-forward WC stacking validation for ensemble weight fitting.
+
+    For fold year Y, fits all four ensemble members on data strictly before each
+    past WC w < Y, then predicts WC w (odds-bearing rows). Leakage-safe by
+    construction: each WC w is predicted out-of-time using members trained on
+    data before wc_start(w).
+
+    Returns (labels, [poi_probs, dc_probs, log_probs, tree_probs]).
+    Returns empty lists when no past WC exists (e.g. 2010 fold).
+    """
+    past_years = sorted(w for w in _WC_START if w < year)
+    if not past_years:
+        return [], [[], [], [], []]
+
+    all_labels: list[int] = []
+    all_poi: list[list[float]] = []
+    all_dc: list[list[float]] = []
+    all_log: list[list[float]] = []
+    all_tree: list[list[float]] = []
+
+    for w in past_years:
+        wc_start_w = pd.Timestamp(_WC_START[w])
+
+        train_elo_w = elo_all[elo_all["date"] < wc_start_w]
+        train_matches_w = matches[matches["date"] < wc_start_w]
+
+        if train_elo_w.empty:
+            continue
+
+        base_w, beta_w = poisson_fit(train_elo_w)
+        dc_params_w = dc_fit(train_matches_w, ref_date=wc_start_w)
+        fit_labels = [
+            _label(int(r.goals_a), int(r.goals_b)) for _, r in train_elo_w.iterrows()
+        ]
+        log_scaler_w, log_model_w = log_fit(train_elo_w, fit_labels)
+        tree_model_w = tree_fit(train_elo_w, fit_labels)
+
+        test_matches_w = matches[
+            (matches["date"] >= wc_start_w)
+            & matches["is_world_cup"]
+            & (matches["date"].dt.year == w)
+        ]
+        test_elo_w = elo_all[
+            (elo_all["date"] >= wc_start_w) & (elo_all["date"].dt.year == w)
+        ]
+        test_elo_w = test_elo_w[test_elo_w["match_id"].isin(test_matches_w["match_id"])]
+
+        if test_elo_w.empty:
+            continue
+
+        for _, row in test_elo_w.iterrows():
+            ga, gb = int(row.goals_a), int(row.goals_b)
+            all_labels.append(_label(ga, gb))
+            vp = predict_one(float(row.elo_diff_adj), base_w, beta_w)
+            all_poi.append([vp["p_win"], vp["p_draw"], vp["p_loss"]])
+            vd = dc_predict_one(dc_params_w, row.team_a, row.team_b, bool(row.neutral))
+            all_dc.append([vd["p_win"], vd["p_draw"], vd["p_loss"]])
+
+        all_log.extend(log_predict(log_scaler_w, log_model_w, test_elo_w))
+        all_tree.extend(tree_predict(tree_model_w, test_elo_w))
+
+    return all_labels, [all_poi, all_dc, all_log, all_tree]
+
+
 def _score_model(
     labels: list[int],
     probs: list[list[float]],
@@ -305,9 +374,21 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
             if len(val_elo) > 0 else []
         )
 
-        # Step 3: fit weights + temperature on validation predictions
-        if val_labels_ens:
-            member_probs_val = [val_p_poi, val_p_dc2, val_p_log, val_p_tree]
+        # Step 3: fit weights on odds-bearing WC validation; temperature on non-WC slice
+        wc_val_labels, wc_val_member_probs = build_wc_stacking_validation(
+            year, matches, elo_all
+        )
+        member_probs_val = [val_p_poi, val_p_dc2, val_p_log, val_p_tree]
+        if wc_val_labels:
+            ens_weights = ens_fit_weights(wc_val_member_probs, wc_val_labels, pool=ENSEMBLE_POOL)
+            if val_labels_ens:
+                val_ens = ens_combine_probs(member_probs_val, ens_weights, pool=ENSEMBLE_POOL)
+                T_ens = fit_temperature(val_labels_ens, val_ens)
+                ece_ens_before = round(expected_calibration_error(val_labels_ens, val_ens), 4)
+                ece_ens_after = round(expected_calibration_error(val_labels_ens, cal_apply(val_ens, T_ens)), 4)
+            else:
+                T_ens, ece_ens_before, ece_ens_after = 1.0, 0.0, 0.0
+        elif val_labels_ens:
             ens_weights = ens_fit_weights(member_probs_val, val_labels_ens, pool=ENSEMBLE_POOL)
             val_ens = ens_combine_probs(member_probs_val, ens_weights, pool=ENSEMBLE_POOL)
             T_ens = fit_temperature(val_labels_ens, val_ens)
