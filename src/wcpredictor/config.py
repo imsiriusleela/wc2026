@@ -40,3 +40,7 @@ DC_CAL_VALIDATION_YEARS: int = 2                   # validation slice length for
 
 # Ensemble
 ENSEMBLE_POOL: str = "log"                         # "log" (log-opinion) or "linear"
+
+# Form features
+FORM_WINDOW: int = 5                               # rolling window for recent-form features
+REST_DAYS_CAP: int = 30                            # cap on days-since-last-match

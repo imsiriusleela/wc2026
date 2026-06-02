@@ -41,6 +41,7 @@ from wcpredictor.evaluation.metrics import (
     topn_hit_rate,
 )
 from wcpredictor.features.elo import compute_elo
+from wcpredictor.features.form import compute_form
 from wcpredictor.models.calibration import apply as cal_apply
 from wcpredictor.models.calibration import expected_calibration_error, fit_temperature
 from wcpredictor.models.dixon_coles import fit as dc_fit
@@ -125,6 +126,8 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
 
     matches = load_matches()
     elo_all, _final_ratings = compute_elo(matches)
+    form_all, _ = compute_form(matches)
+    elo_all = elo_all.merge(form_all, on="match_id", how="left")
 
     results = {}
     for year in years:

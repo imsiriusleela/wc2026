@@ -23,6 +23,7 @@ from wcpredictor.data.download import download_results
 from wcpredictor.data.load_matches import load_matches
 from wcpredictor.data.normalize_teams import canonical
 from wcpredictor.features.elo import compute_elo, latest_elo
+from wcpredictor.features.form import compute_form, form_row as _form_row
 from wcpredictor.models.poisson import fit as poisson_fit
 from wcpredictor.models.poisson import predict_one as poisson_predict_one
 
@@ -77,6 +78,9 @@ def predict_match(
     train = matches[matches["date"] < cutoff].copy()
 
     elo_df, final_ratings = compute_elo(train)
+    form_df, form_state = compute_form(train)
+    elo_df = elo_df.merge(form_df, on="match_id", how="left")
+
     ratings = latest_elo(elo_df, before_date=cutoff, final_ratings=final_ratings)
     r_a = ratings.get(team_a, INITIAL_RATING)
     r_b = ratings.get(team_b, INITIAL_RATING)
@@ -149,7 +153,14 @@ def predict_match(
         p_poi = poisson_predict_one(elo_diff_adj, full_base, full_beta)
         p_dc = dc_predict_one(dc_params, team_a, team_b, neutral=neutral)
 
-        test_row = pd.DataFrame({"elo_diff_adj": [elo_diff_adj], "neutral": [neutral]})
+        fr = _form_row(form_state, team_a, team_b, cutoff)
+        test_row = pd.DataFrame({
+            "elo_diff_adj": [elo_diff_adj],
+            "neutral": [neutral],
+            "form_diff": [fr["form_diff"]],
+            "momentum_diff": [fr["momentum_diff"]],
+            "rest_diff": [fr["rest_diff"]],
+        })
         p_log_proba = log_predict(log_scaler, log_model, test_row)[0]
 
         # Combine W/D/L

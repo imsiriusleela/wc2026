@@ -1,170 +1,145 @@
-# HANDOFF — Phase 3.1: Decorrelate the ensemble with richer derived features
+# HANDOFF — Phase 3.2: Fix the thin validation slice (escape the 1/3 weight collapse)
 
 ## Goal
 
-Make the calibrated ensemble {Poisson, Dixon-Coles, multinomial-logistic} good enough to
-**beat every World Cup fold** so `predict_match`'s default can flip from `"poisson"` to
-`"ensemble"`. We do this by attacking the **root cause of the ≈1/3-each weight collapse**:
-the logistic member currently encodes the same Elo signal as Poisson, so the three members
-are redundant. Give the logistic member **leak-free derived features from the existing match
-data** (recent form, goal momentum, rest/fatigue) that the strength-based members
-structurally cannot capture. No new external data sources.
+Attack the **remaining** root cause of the ensemble's ≈1/3-each weight collapse so
+`predict_match`'s default can flip from `"poisson"` to `"ensemble"`. Phase 3.1 added
+orthogonal recent-form features to the logistic member (cause **a**), but weights still stayed
+≈1/3 across all four folds — the diagnosis was cause **b: the 2-year validation slice is too
+thin** for the weight optimizer to find signal above the Elo noise floor. This phase widens
+the validation slice and re-measures.
+
+This is an **experiment with a decision gate**, not a feature build. The code surface is tiny;
+the value is in the measurement and the promote/defer decision.
 
 User decisions for this phase:
-- **Approach:** richer *derived* features from existing data (not a longer validation
-  window, not new external data).
-- **Promotion bar:** strict — win on every fold (see "Promotion decision" below).
+- **Direction:** Phase 3.2 = validation-slice fix (not tournament simulator, not new external
+  signal yet, not API/frontend).
+- **Phase 3.1 disposition:** commit the completed Phase 3.1 work first as its own commit, then
+  start 3.2 clean.
 
 ## Relevant context and constraints
 
-- **Phase 3 is complete and green: 57 tests pass.** `models/ensemble.py`,
-  `models/logistic.py`, leakage-safe stacking in `evaluation/backtest.py`, and the
-  `model="ensemble"` path in `predict.py` all exist and work. Do **not** rebuild them.
-- **Why this phase exists.** From `data/processed/backtest_report.json`: the ensemble wins
-  on aggregate and dominates DC+Cal in 3/4 folds, but loses to DC+Cal in 2010 and is
-  fractionally behind Poisson in 2014–2018. Fitted blend weights converge to ≈1/3 each
-  because (a) the logistic member uses only `elo_diff_adj`+`neutral` — redundant with
-  Poisson — and (b) the thin 2-year validation slice gives the optimizer little signal.
-  We fix (a); (a) is the dominant cause.
-- **Binding rules (CLAUDE.md):** 90-min regulation label; no leakage; time-aware splits
-  only; reproducible; no hard-coded 2026 teams; leakage tests are the gate; no silent
-  scraping (this phase adds **no** new data source). Reuse `metrics.py`, `calibration.py`.
-- **Leakage discipline:** new features must be emitted **pre-match** (before the per-team
-  state is updated with the current result), exactly like `compute_elo`.
+- **Phase 3.1 is complete and green (71 tests pass) but UNCOMMITTED.** Working tree carries
+  `src/wcpredictor/features/form.py`, `tests/test_form.py`, and edits to `logistic.py`,
+  `backtest.py`, `predict.py`, `config.py`, `README.md`, `HANDOFF.md`. Promotion was deferred;
+  default stayed `"poisson"`. Land this first (Step 0).
+- **Phase 3.1 verdict (from prior HANDOFF / README):** form features were orthogonal to Elo
+  but the ensemble barely moved (aggregate 0.9800 → 0.9790) and weights stayed ≈1/3. Strict
+  bar not met. Per-fold Ens+Cal lost to DC+Cal in 2010 and to Poisson in 2014/2018/2022.
+- **Binding rules (CLAUDE.md):** 90-min regulation label; no leakage; time-aware splits only;
+  reproducible; no hard-coded 2026 teams; leakage tests are the gate; **no new external data
+  source this phase**. Reuse existing `metrics.py` / `calibration.py` / `ensemble.py`.
 
 ## Files inspected
 
-- `src/wcpredictor/features/elo.py` — `compute_elo(matches) -> (features_df, final_ratings)`
-  walks matches in date order, **emits the pre-match row before updating** Elo (the
-  leak-free pattern to mirror). `latest_elo(...)` returns current ratings before a date.
-- `src/wcpredictor/models/logistic.py` — `_build_X` stacks only `elo_diff_adj`, `neutral`;
-  `fit`/`predict_proba` wrap `StandardScaler` + `LogisticRegression`. The extension point.
-- `src/wcpredictor/evaluation/backtest.py` — `elo_all = compute_elo(matches)` at L127; all
-  fold slices (`train_elo`, `early_train_elo`, `val_elo`, `test_elo`) are slices of
-  `elo_all` and feed `log_fit`/`log_predict`. Leakage-safe stacking (steps 1–5, L227–286)
-  fits weights/temperature on an out-of-time validation slice. Hard assertion
-  `train.date.max() < test.date.min()` at L146.
-- `src/wcpredictor/predict.py` — `model="ensemble"` path (L84–180) hand-builds the logistic
-  feature row at **L152** `test_row = pd.DataFrame({"elo_diff_adj": [...], "neutral": [...]})`.
-  This row must also carry the new features for predict/backtest parity.
-- `src/wcpredictor/config.py` — Elo/DC/ensemble constants; `DC_CAL_VALIDATION_YEARS = 2`,
-  `ENSEMBLE_POOL = "log"`. Add the new form constants here.
+- `src/wcpredictor/config.py:39` — `DC_CAL_VALIDATION_YEARS: int = 2`. The constant to change.
+- `src/wcpredictor/evaluation/backtest.py`:
+  - `L135` `cal_start = wc_start - pd.DateOffset(years=DC_CAL_VALIDATION_YEARS)`.
+  - `L211–228` DC calibration validation slice (`val_elo` → temperature `T`, ECE before/after).
+  - `L230–269` ensemble stacking: `early_train_*` fit on `< cal_start` (L232–233); member preds
+    on the `cal_start → wc_start` slice; weights + ensemble temperature fit there (L242–269).
+  - `L300–324` where `model_dc_cal` ECE and `model_ensemble_cal` weights/log_loss are emitted.
+  - `L149` hard leakage assertion `train.date.max() < test.date.min()`.
+- `tests/test_backtest_time_safety.py` — self-contained; does **not** depend on the constant;
+  unaffected by any value tried here.
 
 ## Current findings
 
-- The logistic member is fit on the **full train set** (thousands of matches), while only
-  the ensemble *weights* are fit on the thin validation slice. So adding features to the
-  logistic member does **not** worsen thin-slice overfit — it sharpens the member, which is
-  exactly what lets the stacker move weights off 1/3.
-- Poisson uses `elo_diff_adj` (long-run strength + home); DC uses per-team attack/defense
-  over 10 years with a 2-year half-life (medium-run strength). **Neither encodes short-term
-  state** — last-5-games form, scoring/conceding momentum, fixture congestion. Those are the
-  orthogonal signals.
-- Because every fold slice derives from `elo_all`, merging the new features into `elo_all`
-  **once** propagates them through backtest and (with a parallel merge) predict — minimal
-  surface area.
+- **`DC_CAL_VALIDATION_YEARS` is one constant doing double duty.** `cal_start` drives **both**
+  the DC calibration slice **and** the ensemble's `early_train` cutoff + weight-fitting slice.
+  So bumping it widens the ensemble's weight-fitting data (the intended fix) **but also**
+  widens DC's calibration slice and shrinks the `early_train` window. This coupling is exactly
+  the "may destabilize DC calibration" risk flagged previously.
+- Larger N only moves `cal_start` *earlier* (still far after the 1870s data start), so the
+  leakage assertion and `cal_start < wc_start` / `early_train < cal_start` orderings keep
+  holding. Existing empty-slice guards (L221/L260/L267) fall back safely.
 
 ## Proposed implementation plan
 
-### New: `src/wcpredictor/features/form.py` (mirror `compute_elo`)
-`compute_form(matches, window=FORM_WINDOW) -> (form_df, form_state)`
-- One date-ordered walk; per-team rolling state: deque of last-`window` results (pts 3/1/0),
-  deque of last-`window` goal differences, `last_match_date`.
-- **Emit the pre-match row before updating state** (leak-free). Features differenced
-  (team_a − team_b) to stay signed like `elo_diff_adj`:
-  - `form_diff` — rolling points-per-game over last `window`
-  - `momentum_diff` — rolling mean goal difference over last `window`
-  - `rest_diff` — days since previous match (each side capped at `REST_DAYS_CAP`)
-- Columns: `match_id, form_diff, momentum_diff, rest_diff`. Cold start → neutral defaults
-  (0, 0, cap); **no NaNs**.
-- `form_state` maps team → current deques + last date (parallels `final_ratings`).
-- Helper `form_row(form_state, team_a, team_b, query_date, window) -> dict` builds the three
-  differenced features for one hypothetical match (for the predict single-match path).
+### Step 0 — Land Phase 3.1 (commit first)
+Commit the green working tree as its own Phase 3.1 commit. Suggested message:
+`Phase 3.1: form features for logistic member (promotion deferred)`.
 
-### Modify: `src/wcpredictor/models/logistic.py`
-Extend `_build_X` to stack `["elo_diff_adj", "neutral", "form_diff", "momentum_diff",
-"rest_diff"]`, **tolerant of absent columns (default 0.0)** so old call sites/tests stay
-valid. Update the module docstring's feature list. `StandardScaler` handles the new scales.
+### Step 1 — Experiment A: shared bump (cheapest, try first)
+Set `config.py:39` `DC_CAL_VALIDATION_YEARS = 3`, run the backtest, record per fold:
+- `model_ensemble_cal` weights `[poi, dc, log]` — did they move meaningfully off 1/3?
+- `model_ensemble_cal.log_loss` vs Poisson and DC+Cal (strict bar, all four folds + aggregate).
+- `model_dc_cal` `ece_before_val → ece_after_val` + `temperature` — **did DC calibration
+  destabilize** vs the committed N=2 numbers?
 
-### Modify: `src/wcpredictor/evaluation/backtest.py`
-After `elo_all, _ = compute_elo(matches)` (~L127): `form_all, _ = compute_form(matches)`
-then `elo_all = elo_all.merge(form_all, on="match_id", how="left")`. **No other backtest
-edit** — downstream slices inherit the columns; Poisson/DC paths ignore them.
+Repeat with `4`. Compare 2 / 3 / 4 side by side.
 
-### Modify: `src/wcpredictor/predict.py` (ensemble path only)
-- After `compute_elo(train)`, also `compute_form(train)`; merge form columns into `elo_df`
-  before the logistic fits (L79/L112/L144).
-- Replace the L152 `test_row` to include `form_diff/momentum_diff/rest_diff` from
-  `form_row(form_state, team_a, team_b, cutoff, FORM_WINDOW)`.
-- `poisson` / `dixon_coles` paths unchanged.
+### Step 2 — Decision gate
+- **Clean win** (weights off 1/3, DC ECE not worse, strict bar met every fold at N=3 or 4):
+  promote → Step 4.
+- **Ensemble helped but DC calibration destabilized:** decouple → Step 3, re-measure, re-gate.
+- **No movement / bar still missed even decoupled:** record the negative result, leave default
+  `"poisson"`, document, stop. Do **not** loosen the bar.
 
-### Modify: `src/wcpredictor/config.py`
-Add `FORM_WINDOW: int = 5` and `REST_DAYS_CAP: int = 30`. Leave `DC_CAL_VALIDATION_YEARS = 2`.
+### Step 3 — Experiment B: decouple (only if Step 2 says DC destabilized)
+- Add `ENSEMBLE_VAL_YEARS: int = 3` (or 4) to `config.py`; **leave `DC_CAL_VALIDATION_YEARS = 2`**.
+- In `backtest.py`, compute a separate `ens_cal_start = wc_start - pd.DateOffset(years=
+  ENSEMBLE_VAL_YEARS)` used **only** for the ensemble block: the `early_train_elo`/
+  `early_train_matches` cutoff (L232–233) and a dedicated `ens_val_elo` slice feeding steps 2–3
+  (L242–269). Keep the existing `cal_start`/`val_elo` DC-calibration path byte-for-byte
+  unchanged. Add `ENSEMBLE_VAL_YEARS` to the config import at L30.
+- Re-run; re-apply the Step 2 gate.
 
-### Tests
-- **New `tests/test_form.py`:** leak-free (first appearance of every team → neutral
-  defaults; a row uses only strictly-earlier matches); differenced symmetry (swap team_a/b →
-  negated diffs); `rest_diff` sign + cap; deterministic; no NaNs.
-- **Update `tests/test_logistic.py`:** add the three columns to fixtures; keep
-  monotonic-in-`elo_diff_adj` (others held constant); add a case proving `_build_X` works
-  when the new columns are absent (defaults 0.0).
-- `tests/test_ensemble.py` unaffected (operates on probability vectors).
+### Step 4 — Promote (only if the gate is cleared)
+- `predict.py`: change the `model` param default `Literal[...] = "poisson"` → `"ensemble"` and
+  update its docstring.
+- `README.md`: mark Ensemble as default in the model table, replace the Phase 3.1 result block
+  with Phase 3.2 numbers, bump `model_version`.
+- Regenerate `data/processed/backtest_report.json` (the backtest `__main__` already writes it).
 
-## Promotion decision (strict bar)
+### Step 5 — Always: update this HANDOFF
+Record the chosen `N` (and whether decoupled), per-fold table, weights, gate outcome, and the
+promote/defer decision (mirror the Phase 3.1 verdict section). Fill the "Exact next steps"
+below with what follows (e.g. the orthogonal-signal path if promotion is still deferred).
 
-Re-run the backtest, then flip `predict_match`'s default to `"ensemble"` **only if**
-`model_ensemble_cal` satisfies **all**:
+## Strict promotion bar (unchanged from Phase 3.1 — do NOT loosen)
+
+Flip the default to `"ensemble"` **only if** `model_ensemble_cal` satisfies **all**:
 1. W/D/L `log_loss` ≤ best single model (Poisson / DC+Cal) on **all four folds**,
 2. best **aggregate** mean log loss, and
 3. calibrated ECE no worse than `model_dc_cal`.
 
-If met: change the `Literal[...] = "poisson"` default + docstring in `predict.py`; update
-`README.md` result table + `model_version`. If **not** met: leave default `"poisson"`,
-record new weights/metrics, report promotion still deferred — **do not loosen the bar to
-force a flip**. Regenerate `data/processed/backtest_report.json` either way.
-
 ## Exact next steps
 
-1. Start a fresh **execution** session (this was planning-only).
-2. `config.py`: add `FORM_WINDOW`, `REST_DAYS_CAP`.
-3. `features/form.py`: `compute_form` + `form_row` → `tests/test_form.py` green.
-4. `models/logistic.py`: extend `_build_X` (+ docstring) → update `tests/test_logistic.py` green.
-5. `backtest.py`: merge `form_all` into `elo_all`.
-6. `predict.py`: merge form into `elo_df`; build form features in the single-match `test_row`.
-7. Run full verification (below); read per-fold `model_ensemble_cal` + printed weights.
-8. Apply the **Promotion decision** strictly; update `README.md` + this `HANDOFF.md` verdict;
-   regenerate `backtest_report.json`.
+1. `git add -A && git commit` the Phase 3.1 working tree (Step 0).
+2. Edit `config.py:39` → `3`; run the backtest; record metrics (Step 1).
+3. Repeat at `4`; compare; apply the gate (Step 2).
+4. If DC destabilized, decouple (Step 3) and re-measure.
+5. Promote or document-and-defer (Step 4 / Step 5).
 
 ## Verification / test commands
 
-- `uv run pytest -q` — all green (57 existing + new `test_form`; leakage tests gate).
-- `uv run python -m wcpredictor.evaluation.backtest` — inspect per-fold `model_ensemble_cal`
-  vs Poisson/DC+Cal and the printed `w=[poi … dc … log …]`. **Success signals:** weights
-  move meaningfully off 1/3 (logistic earns weight) and the strict bar is met on every fold.
-- `uv run python -c "from wcpredictor.predict import predict_match; import json;
-  print(json.dumps(predict_match('Brazil','France','2026-06-15',neutral=True,model='ensemble'),indent=2)[:400])"`
-  — §11.1 shape intact, probs sum≈1, 5 scorelines, sane λ.
+- `uv run pytest -q` — all 71 tests stay green for every config value tried (time-safety +
+  leakage tests gate).
+- `uv run python -m wcpredictor.evaluation.backtest` — inspect per-fold
+  `w=[poi … dc … log …]` (success = weights clearly off 1/3) and `model_ensemble_cal` vs
+  Poisson/DC+Cal; confirm `model_dc_cal` ECE not worse than the committed N=2 baseline.
+- If promoted: `uv run python -c "from wcpredictor.predict import predict_match; import json;
+  print(json.dumps(predict_match('Brazil','France','2026-06-15',neutral=True),indent=2)[:400])"`
+  — default now routes through the ensemble; shape (§11.1) intact, probs sum≈1, 5 scorelines.
 
 ## Risks and open questions
 
-- **May still not clear the strict bar.** Form features are orthogonal but Elo dominance is
-  strong; the ensemble may improve yet still lose a fold. Acceptable — default stays
-  `"poisson"`. Do not force the flip.
-- **`FORM_WINDOW` choice.** 5 is the default; if borderline, try 10 as a one-line documented
-  change — not a free hyperparameter search.
-- **Cold-start teams** get neutral defaults; `StandardScaler` centres them and the bulk of
-  training data is well-populated.
-- **Predict/backtest parity.** `form_row` must reuse the same `FORM_WINDOW`/`REST_DAYS_CAP`
-  as the walk, or query features drift from the training distribution.
+- **May still not clear the bar.** Widening trades optimizer signal against DC calibration
+  stability and a shorter `early_train`. Acceptable outcome: stays `"poisson"`, documented.
+  Do not force the flip.
+- **N=4 on the 2010 fold:** `early_train` becomes `< 2006`; confirm `early_train_*` and
+  `val_elo`/`ens_val_elo` are non-empty for every fold (guards at L221/L260/L267 cover it).
+- **Decoupling:** keep DC's `val_elo`/`cal_start` path unchanged so `model_dc`/`model_dc_cal`
+  numbers don't move for reasons unrelated to the experiment.
 
 ## What not to repeat / failed approaches
 
-- Don't widen the validation window or add external data (xG/odds/squads) in this phase —
-  the user chose derived features; new sources also trip the no-scraping rule.
-- Don't re-add DC-strength-diff (`α_a−α_b`) to the logistic member — it re-introduces
-  redundancy with the DC member; the point is *orthogonal* short-term signals.
-- Don't fit the stacker weights or logistic on the holdout / in-sample member preds — keep
-  the out-of-time validation slice and the per-fold leakage assertion.
-- Don't compute form features in a second non-chronological pass — emit pre-match within one
-  date-ordered walk, like `compute_elo`.
-- Don't loosen the strict promotion bar to make the flip happen.
+- Don't revisit `FORM_WINDOW` / form features — Phase 3.1 settled that; the problem is the
+  slice, not the window.
+- Don't add external data (xG/odds/squads) this phase — that's the *next* fallback if 3.2 also
+  defers, and it needs explicit approval (no-scraping rule).
+- Don't fit weights/temperature/logistic on the holdout or in-sample member preds; keep the
+  out-of-time slice and the per-fold leakage assertion.
+- Don't loosen the strict promotion bar to manufacture a flip.

@@ -1,6 +1,7 @@
 """Multinomial logistic W/D/L member.
 
-Features: elo_diff_adj, neutral (binary 0/1).
+Features: elo_diff_adj, neutral (binary 0/1),
+          form_diff, momentum_diff, rest_diff (absent columns default to 0.0).
 Output: [p_win, p_draw, p_loss] probability vectors only.
 No score matrix — contributes only to the W/D/L ensemble pool.
 """
@@ -65,8 +66,17 @@ def predict_proba(
     return out.tolist()
 
 
+_FORM_COLS = ("form_diff", "momentum_diff", "rest_diff")
+
+
 def _build_X(features_df: pd.DataFrame) -> np.ndarray:
-    return np.column_stack([
+    cols = [
         features_df["elo_diff_adj"].to_numpy(float),
         features_df["neutral"].astype(float).to_numpy(),
-    ])
+    ]
+    for col in _FORM_COLS:
+        if col in features_df.columns:
+            cols.append(features_df[col].to_numpy(float))
+        else:
+            cols.append(np.zeros(len(features_df), dtype=float))
+    return np.column_stack(cols)

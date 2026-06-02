@@ -53,14 +53,14 @@ The ensemble adds two more blocks:
 - **`model_ensemble`** — log-opinion pool over {Poisson, DC, multinomial-logistic}; leakage-safe weights fit on the out-of-time validation slice; score matrix is a Poisson+DC linear blend (logistic contributes W/D/L only).
 - **`model_ensemble_cal`** — same, with temperature calibration; `weights_poisson/dc/logistic` show the fitted blend; `ece_before_val` / `ece_after_val` measure calibration on the validation slice.
 
-**Phase 3 backtest result (2010–2022):**
+**Phase 3.1 backtest result (2010–2022, logistic with form features):**
 
-| Fold | Poisson | DC+Cal | Ens+Cal |
-|------|---------|--------|---------|
-| 2010 | 0.9828 | **0.9474** | 0.9683 |
-| 2014 | **0.9152** | 0.9376 | 0.9200 |
-| 2018 | 0.9690 | 0.9904 | **0.9713** |
-| 2022 | 0.9541 | 1.1105 | **0.9605** |
-| mean | 0.9803 | 0.9965 | **0.9800** |
+| Fold | Poisson | DC+Cal | Ens+Cal | Verdict |
+|------|---------|--------|---------|---------|
+| 2010 | 0.9828 | **0.9474** | 0.9660 | Ens loses to DC+Cal |
+| 2014 | **0.9152** | 0.9376 | 0.9172 | Ens loses to Poisson |
+| 2018 | **0.9690** | 0.9904 | 0.9693 | Ens loses to Poisson |
+| 2022 | **1.0541** | 1.1105 | 1.0634 | Ens loses to Poisson |
+| mean | **0.9803** | 0.9965 | 0.9790 | Ens best aggregate |
 
-The ensemble wins on aggregate and dominates DC+Cal in 3/4 folds, but falls behind DC+Cal in 2010 and fractionally behind Poisson in 2014–2018.  Per the build rules, the default stays `"poisson"` until the ensemble wins on every fold.  Weights converge to ≈1/3 each — the thin 2-year validation slice gives the optimizer insufficient signal to differentiate members, and the logistic member encodes similar Elo information to the Poisson model.  Consider revisiting with a longer validation window or richer features (xG, squad depth) before promoting ensemble as the default.
+Phase 3.1 added form features (rolling 5-match points-per-game, goal-difference momentum, rest/fatigue) to the logistic member to break the Elo-redundancy root cause.  Ensemble aggregate improved slightly (0.9800 → 0.9790) but weights remain ≈1/3 each — the thin 2-year validation slice still dominates the weight optimizer, preventing meaningful differentiation.  Strict bar (must win every fold) not met; default stays `"poisson"`.  Promotion deferred until either the validation slice problem is addressed or a truly orthogonal signal (xG, squad depth) is added.
