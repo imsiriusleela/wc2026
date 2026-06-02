@@ -63,6 +63,8 @@ from wcpredictor.models.ensemble import (
     matrix_to_lambdas,
     matrix_to_top_scorelines,
 )
+from wcpredictor.models.gbm import fit as tree_fit
+from wcpredictor.models.gbm import predict_proba as tree_predict
 from wcpredictor.models.logistic import fit as log_fit
 from wcpredictor.models.logistic import predict_proba as log_predict
 from wcpredictor.models.poisson import fit as poisson_fit
@@ -276,6 +278,7 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
         early_labels_for_log = [_label(int(r.goals_a), int(r.goals_b))
                                  for _, r in early_train_elo.iterrows()]
         early_log_scaler, early_log_model = log_fit(early_train_elo, early_labels_for_log)
+        early_tree_model = tree_fit(early_train_elo, early_labels_for_log)
 
         # Step 2: out-of-time member predictions on validation slice
         val_labels_ens: list[int] = []
@@ -294,27 +297,33 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
             log_predict(early_log_scaler, early_log_model, val_elo)
             if len(val_elo) > 0 else []
         )
+        val_p_tree: list[list[float]] = (
+            tree_predict(early_tree_model, val_elo)
+            if len(val_elo) > 0 else []
+        )
 
         # Step 3: fit weights + temperature on validation predictions
         if val_labels_ens:
-            member_probs_val = [val_p_poi, val_p_dc2, val_p_log]
+            member_probs_val = [val_p_poi, val_p_dc2, val_p_log, val_p_tree]
             ens_weights = ens_fit_weights(member_probs_val, val_labels_ens, pool=ENSEMBLE_POOL)
             val_ens = ens_combine_probs(member_probs_val, ens_weights, pool=ENSEMBLE_POOL)
             T_ens = fit_temperature(val_labels_ens, val_ens)
             ece_ens_before = round(expected_calibration_error(val_labels_ens, val_ens), 4)
             ece_ens_after = round(expected_calibration_error(val_labels_ens, cal_apply(val_ens, T_ens)), 4)
         else:
-            ens_weights = np.array([1 / 3, 1 / 3, 1 / 3])
+            ens_weights = np.array([0.25, 0.25, 0.25, 0.25])
             T_ens, ece_ens_before, ece_ens_after = 1.0, 0.0, 0.0
 
-        # Step 4: full-data logistic (Poisson + DC already fit above on < wc_start)
+        # Step 4: full-data logistic + tree (Poisson + DC already fit above on < wc_start)
         train_labels_for_log = [_label(int(r.goals_a), int(r.goals_b))
                                  for _, r in train_elo.iterrows()]
         log_scaler, log_model = log_fit(train_elo, train_labels_for_log)
         probs_log_test: list[list[float]] = log_predict(log_scaler, log_model, test_elo)
+        tree_model = tree_fit(train_elo, train_labels_for_log)
+        probs_tree_test: list[list[float]] = tree_predict(tree_model, test_elo)
 
         # Step 5: combine members on test set with frozen weights
-        member_probs_test = [probs, probs_dc, probs_log_test]
+        member_probs_test = [probs, probs_dc, probs_log_test, probs_tree_test]
         ens_probs = ens_combine_probs(member_probs_test, ens_weights, pool=ENSEMBLE_POOL)
         ens_probs_cal = cal_apply(ens_probs, T_ens)
 
@@ -391,6 +400,7 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
                 "weights_poisson": round(float(ens_weights[0]), 4),
                 "weights_dc": round(float(ens_weights[1]), 4),
                 "weights_logistic": round(float(ens_weights[2]), 4),
+                "weights_tree": round(float(ens_weights[3]), 4),
                 "pool": ENSEMBLE_POOL,
             },
             **({"model_ensemble_market": ens_market_info} if ens_market_info else {}),
@@ -443,7 +453,7 @@ def _print_report(results: dict) -> None:
                   f"acc={ensc['accuracy']:.3f}  T={ensc['temperature']:.3f}  "
                   f"ECE {ensc['ece_before_val']:.3f}→{ensc['ece_after_val']:.3f}  "
                   f"w=[poi={ensc['weights_poisson']:.2f} dc={ensc['weights_dc']:.2f} "
-                  f"log={ensc['weights_logistic']:.2f}]")
+                  f"log={ensc['weights_logistic']:.2f} tree={ensc['weights_tree']:.2f}]")
         ensm = fold.get("model_ensemble_market", {})
         if ensm:
             print(f"  Ens+Mkt    log_loss={ensm['log_loss']:.4f}  brier={ensm['brier']:.4f}  "

@@ -98,6 +98,8 @@ def predict_match(
             matrix_to_lambdas,
             matrix_to_top_scorelines,
         )
+        from wcpredictor.models.gbm import fit as tree_fit
+        from wcpredictor.models.gbm import predict_proba as tree_predict
         from wcpredictor.models.logistic import fit as log_fit
         from wcpredictor.models.logistic import predict_proba as log_predict
 
@@ -114,6 +116,7 @@ def predict_match(
             _lbl(int(r.goals_a), int(r.goals_b)) for _, r in early_elo_df.iterrows()
         ]
         early_log_scaler, early_log_model = log_fit(early_elo_df, early_labels)
+        early_tree_model = tree_fit(early_elo_df, early_labels)
 
         # Validation slice: out-of-time member predictions
         val_elo = elo_df[(elo_df["date"] >= cal_start) & (elo_df["date"] < cutoff)]
@@ -130,15 +133,19 @@ def predict_match(
             log_predict(early_log_scaler, early_log_model, val_elo)
             if len(val_elo) > 0 else []
         )
+        val_p_tree: list[list[float]] = (
+            tree_predict(early_tree_model, val_elo)
+            if len(val_elo) > 0 else []
+        )
 
         # Fit ensemble weights on validation predictions
         if val_labels_e:
-            member_val = [val_p_poi, val_p_dc, val_p_log]
+            member_val = [val_p_poi, val_p_dc, val_p_log, val_p_tree]
             ens_weights = ens_fit_weights(member_val, val_labels_e, pool=ENSEMBLE_POOL)
             val_ens = ens_combine_probs(member_val, ens_weights, pool=ENSEMBLE_POOL)
             T_ens = fit_temperature(val_labels_e, val_ens)
         else:
-            ens_weights = _np.array([1 / 3, 1 / 3, 1 / 3])
+            ens_weights = _np.array([0.25, 0.25, 0.25, 0.25])
             T_ens = 1.0
 
         # Full-data member fits (< cutoff)
@@ -146,6 +153,7 @@ def predict_match(
         full_base, full_beta = poisson_fit(elo_df)
         full_labels = [_lbl(int(r.goals_a), int(r.goals_b)) for _, r in elo_df.iterrows()]
         log_scaler, log_model = log_fit(elo_df, full_labels)
+        tree_model = tree_fit(elo_df, full_labels)
 
         # Predict single match with all members
         home_bonus = 0.0 if neutral else 50.0
@@ -160,14 +168,18 @@ def predict_match(
             "form_diff": [fr["form_diff"]],
             "momentum_diff": [fr["momentum_diff"]],
             "rest_diff": [fr["rest_diff"]],
+            "elo_a_pre": [r_a],
+            "elo_b_pre": [r_b],
         })
         p_log_proba = log_predict(log_scaler, log_model, test_row)[0]
+        p_tree_proba = tree_predict(tree_model, test_row)[0]
 
         # Combine W/D/L
         member_single = [
             [[p_poi["p_win"], p_poi["p_draw"], p_poi["p_loss"]]],
             [[p_dc["p_win"], p_dc["p_draw"], p_dc["p_loss"]]],
             [p_log_proba],
+            [p_tree_proba],
         ]
         combined_wdl = ens_combine_probs(member_single, ens_weights, pool=ENSEMBLE_POOL)[0]
         combined_cal = cal_apply([combined_wdl], T_ens)[0]
@@ -188,7 +200,7 @@ def predict_match(
             "score_matrix": mat,
             "top_scorelines": top_sc,
         }
-        model_version = "ensemble-0.1"
+        model_version = "ensemble-0.2"
 
     elif model == "dixon_coles":
         from wcpredictor.models.dixon_coles import fit as dc_fit
