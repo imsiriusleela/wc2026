@@ -37,6 +37,38 @@ from wcpredictor.models.poisson import fit as poisson_fit
 from wcpredictor.models.poisson import predict_one as poisson_predict_one
 
 
+def _resolve_odds_alpha() -> float:
+    """Return the calibrated odds-blend weight from the pre-computed backtest report.
+
+    Falls back to ODDS_ALPHA_PRIOR (0.0) if the report is absent or unreadable.
+    """
+    from wcpredictor.config import ODDS_ALPHA_PRIOR
+
+    _path = DATA_PROCESSED / "backtest_report.json"
+    if _path.exists():
+        try:
+            report = json.loads(_path.read_text())
+            return float(report.get("odds_alpha_pooled", ODDS_ALPHA_PRIOR))
+        except (KeyError, ValueError, json.JSONDecodeError):
+            pass
+    return float(ODDS_ALPHA_PRIOR)
+
+
+def _build_odds_lookup(
+    odds_df: "pd.DataFrame",
+) -> "dict[tuple[str, str], tuple[float, float, float]]":
+    """Build a (team_a, team_b) → (p_win, p_draw, p_loss) lookup for 2026 fixtures."""
+    lookup: dict = {}
+    if odds_df.empty or "year" not in odds_df.columns:
+        return lookup
+    yr2026 = odds_df[odds_df["year"] == 2026]
+    for _, r in yr2026.iterrows():
+        ta, tb = str(r.team_a), str(r.team_b)
+        lookup[(ta, tb)] = (float(r.p_win), float(r.p_draw), float(r.p_loss))
+        lookup[(tb, ta)] = (float(r.p_loss), float(r.p_draw), float(r.p_win))
+    return lookup
+
+
 def _lbl(ga: int, gb: int) -> int:
     if ga > gb:
         return 0
@@ -57,7 +89,7 @@ def predict_match(
     team_b: str,
     date: str,
     neutral: bool = True,
-    model: Literal["poisson", "dixon_coles", "ensemble"] = "poisson",
+    model: Literal["poisson", "dixon_coles", "ensemble", "ensemble_mkt"] = "ensemble_mkt",
 ) -> dict:
     """Predict a single match.
 
@@ -67,7 +99,7 @@ def predict_match(
     team_b : str   Away/second team name.
     date   : str   ISO date string; only matches strictly before this date are used.
     neutral: bool  True (default) suppresses home-advantage in Elo diff / DC home flag.
-    model  : str   "poisson" (default) or "dixon_coles".
+    model  : str   Model name. Default "ensemble_mkt" (market-blended ensemble, auto-degrades to ensemble_cal when no odds are available).
 
     Returns
     -------
@@ -94,7 +126,7 @@ def predict_match(
     r_a = ratings.get(team_a, INITIAL_RATING)
     r_b = ratings.get(team_b, INITIAL_RATING)
 
-    if model == "ensemble":
+    if model in {"ensemble", "ensemble_mkt"}:
         from wcpredictor.config import DATA_RAW, DC_CAL_VALIDATION_YEARS, ENSEMBLE_POOL
         from wcpredictor.data.download_odds import download_odds
         from wcpredictor.features.odds import load_wc_odds, merge_odds_features
@@ -222,6 +254,19 @@ def predict_match(
         combined_wdl = ens_combine_probs(member_single, ens_weights, pool=ENSEMBLE_POOL)[0]
         combined_cal = cal_apply([combined_wdl], T_ens)[0]
 
+        # Market-odds blending for ensemble_mkt
+        if model == "ensemble_mkt":
+            odds_lookup_single = _build_odds_lookup(load_wc_odds())
+            _odds_entry = odds_lookup_single.get((team_a, team_b))
+            if _odds_entry:
+                _alpha = _resolve_odds_alpha()
+                _blended = [(1 - _alpha) * combined_cal[i] + _alpha * _odds_entry[i] for i in range(3)]
+                _total = sum(_blended)
+                combined_cal = [v / _total for v in _blended]
+            model_version = "ensemble_mkt-0.1"
+        else:
+            model_version = "ensemble-0.2"
+
         # Score matrix (Poisson + DC blend; logistic has none)
         w_score = ens_weights[:2].copy()
         w_score /= w_score.sum()
@@ -238,7 +283,6 @@ def predict_match(
             "score_matrix": mat,
             "top_scorelines": top_sc,
         }
-        model_version = "ensemble-0.2"
 
     elif model == "dixon_coles":
         from wcpredictor.models.dixon_coles import fit as dc_fit
@@ -309,7 +353,7 @@ def _build_frozen_state(
         state["dc_params"] = dc_fit(train, ref_date=cutoff)
 
     if "ensemble" in models or "ensemble_mkt" in models:
-        from wcpredictor.config import DC_CAL_VALIDATION_YEARS, ENSEMBLE_POOL, ODDS_ALPHA_PRIOR
+        from wcpredictor.config import DC_CAL_VALIDATION_YEARS, ENSEMBLE_POOL
         from wcpredictor.data.download_odds import download_odds
         from wcpredictor.features.odds import load_wc_odds, merge_odds_features
         from wcpredictor.models.calibration import apply as cal_apply, fit_temperature
@@ -332,13 +376,7 @@ def _build_frozen_state(
         elo_all = merge_odds_features(elo_df, odds_df)
 
         # Build odds lookup for 2026 fixtures (populated once WC2026 sheet is live)
-        odds_lookup: dict[tuple[str, str], tuple[float, float, float]] = {}
-        yr2026 = odds_df[odds_df["year"] == 2026] if not odds_df.empty and "year" in odds_df.columns else pd.DataFrame()
-        for _, r in yr2026.iterrows():
-            ta, tb = str(r.team_a), str(r.team_b)
-            odds_lookup[(ta, tb)] = (float(r.p_win), float(r.p_draw), float(r.p_loss))
-            odds_lookup[(tb, ta)] = (float(r.p_loss), float(r.p_draw), float(r.p_win))
-        state["odds_lookup"] = odds_lookup
+        state["odds_lookup"] = _build_odds_lookup(odds_df)
 
         cal_start = cutoff - pd.DateOffset(years=DC_CAL_VALIDATION_YEARS)
         early_elo = elo_all[elo_all["date"] < cal_start]
@@ -401,17 +439,7 @@ def _build_frozen_state(
         state["ens_elo_all"] = elo_all  # needed for DC fit that's already in state["dc_params"]
 
         # Resolve odds_alpha for ensemble_mkt — read from pre-computed report when available
-        _alpha_path = DATA_PROCESSED / "backtest_report.json"
-        if _alpha_path.exists():
-            try:
-                _report = json.loads(_alpha_path.read_text())
-                state["odds_alpha"] = float(_report.get("odds_alpha_pooled", ODDS_ALPHA_PRIOR))
-            except (KeyError, ValueError, json.JSONDecodeError):
-                state["odds_alpha"] = float(ODDS_ALPHA_PRIOR)
-        else:
-            from wcpredictor.evaluation.backtest import backtest_world_cups as _bt_fn
-            _bt_res = _bt_fn()
-            state["odds_alpha"] = float(_bt_res.get("odds_alpha_pooled", ODDS_ALPHA_PRIOR))
+        state["odds_alpha"] = _resolve_odds_alpha()
 
     return state
 

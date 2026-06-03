@@ -98,7 +98,7 @@ def _parse_scorelines(raw: Any) -> list[dict[str, Any]] | None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     try:
-        _get_state(DEFAULT_AS_OF, ["poisson"])
+        _get_state(DEFAULT_AS_OF, ["poisson", "dixon_coles", "ensemble"])
     except Exception:
         pass
     yield
@@ -122,7 +122,7 @@ def predict(
     team_a: str = Query(..., description="First team name"),
     team_b: str = Query(..., description="Second team name"),
     model: Literal["poisson", "dixon_coles", "ensemble", "ensemble_mkt"] = Query(
-        "poisson", description="Model to use"
+        "ensemble_mkt", description="Model to use"
     ),
     neutral: bool = Query(True, description="Neutral venue"),
     as_of: str = Query(DEFAULT_AS_OF, description="Data cutoff date (ISO)"),

@@ -417,7 +417,7 @@ def _main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="WC2026 Monte-Carlo tournament simulator")
     parser.add_argument("--as-of", required=True, metavar="DATE", help="Cutoff date YYYY-MM-DD")
     parser.add_argument(
-        "--model", default="ensemble",
+        "--model", default="ensemble_mkt",
         choices=["poisson", "dixon_coles", "ensemble", "ensemble_mkt"],
     )
     parser.add_argument("--n-sims", type=int, default=20_000, metavar="N")

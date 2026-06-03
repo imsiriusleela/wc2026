@@ -20,7 +20,9 @@ Calibration (DC only):
 
 from __future__ import annotations
 
+import csv
 import json
+import math
 import warnings
 from pathlib import Path
 
@@ -120,6 +122,31 @@ def _fit_odds_alpha(
 
     res = minimize_scalar(_neg_ll, bounds=(0.0, 1.0), method="bounded")
     return float(res.x)
+
+
+def _per_match_vec(
+    fold: int,
+    model_name: str,
+    labels: list[int],
+    probs: list[list[float]],
+    has_odds: bool,
+) -> list[dict]:
+    """Return one dict per match with per-sample log-loss, Brier, and correct flag."""
+    rows = []
+    for i, (lbl, p) in enumerate(zip(labels, probs)):
+        ll_i = -math.log(max(p[lbl], 1e-10))
+        br_i = sum((p[c] - (1.0 if c == lbl else 0.0)) ** 2 for c in range(3))
+        rows.append({
+            "fold": fold,
+            "model": model_name,
+            "match_idx": i,
+            "label": lbl,
+            "log_loss_i": round(ll_i, 6),
+            "brier_i": round(br_i, 6),
+            "correct_i": int(int(np.argmax(p)) == lbl),
+            "has_odds": int(has_odds),
+        })
+    return rows
 
 
 def build_wc_stacking_validation(
@@ -241,6 +268,9 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
     prev_odds_labels: list[int] = []
     prev_odds_ens_probs: list[list[float]] = []
     prev_odds_market_probs: list[list[float]] = []
+
+    # Per-match collector for model_select.py bootstrap analysis
+    permatch_rows: list[dict] = []
 
     results = {}
     for year in years:
@@ -452,6 +482,14 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
             prev_odds_ens_probs.extend(ens_probs_cal)
             prev_odds_market_probs.extend(market_probs_test)
 
+        # ── Per-match capture for bootstrap model selection ─────────────────
+        _has_odds = year >= 2018  # effective odds split: 2018/2022 vs 2010/2014
+        permatch_rows.extend(_per_match_vec(year, "poisson", labels, probs, _has_odds))
+        permatch_rows.extend(_per_match_vec(year, "dc_cal", labels_dc, probs_dc_cal, _has_odds))
+        permatch_rows.extend(_per_match_vec(year, "ens_cal", labels_dc, ens_probs_cal, _has_odds))
+        if ens_probs_market:
+            permatch_rows.extend(_per_match_vec(year, "ens_mkt", labels_dc, ens_probs_market, _has_odds))
+
         # ── Compile fold results ────────────────────────────────────────────
         fold: dict = {
             "n_matches": len(labels),
@@ -512,12 +550,25 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
         odds_alpha_pooled = float(ODDS_ALPHA_PRIOR)
     results["odds_alpha_pooled"] = round(odds_alpha_pooled, 4)
 
+    # Write per-match CSV for bootstrap model selection
+    if permatch_rows:
+        DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+        pm_path = DATA_PROCESSED / "backtest_permatch.csv"
+        _pm_fields = ["fold", "model", "match_idx", "label",
+                      "log_loss_i", "brier_i", "correct_i", "has_odds"]
+        with open(pm_path, "w", newline="") as _f:
+            _w = csv.DictWriter(_f, fieldnames=_pm_fields)
+            _w.writeheader()
+            _w.writerows(permatch_rows)
+
     return results
 
 
 def _print_report(results: dict) -> None:
     print("\n=== World Cup Holdout Backtest ===")
     for year, fold in results.items():
+        if not isinstance(fold, dict):
+            continue
         n = fold["n_matches"]
         m = fold["model"]
         dc = fold["model_dc"]

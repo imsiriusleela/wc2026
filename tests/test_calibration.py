@@ -59,6 +59,15 @@ def test_ece_nonneg_and_bounded():
     assert 0.0 <= ece <= 1.0
 
 
+def test_fit_temperature_returns_one_for_small_sample():
+    """Fewer than MIN_CAL_SAMPLES labels → T=1.0 (no-op guard)."""
+    rng = np.random.default_rng(0)
+    labels = [0, 1, 2] * 5  # 15 samples < _MIN_CAL_SAMPLES=30
+    probs = rng.dirichlet([2.0, 1.0, 1.0], size=15).tolist()
+    T = fit_temperature(labels, probs)
+    assert T == 1.0
+
+
 def test_ece_decreases_after_calibration():
     """ECE should not increase after temperature calibration on the same set."""
     labels, probs = _make_probs()

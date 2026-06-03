@@ -14,6 +14,7 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 
 _EPS = 1e-10
+_MIN_CAL_SAMPLES = 30  # Guard: don't fit T on tiny slices (unstable optimisation)
 
 
 def _softmax_temp(probs: np.ndarray, T: float) -> np.ndarray:
@@ -39,6 +40,9 @@ def fit_temperature(labels: list[int], probs: list[list[float]]) -> float:
     -------
     T > 0 (scalar float)
     """
+    if len(labels) < _MIN_CAL_SAMPLES:
+        return 1.0
+
     arr = np.array(probs, dtype=float)
 
     def objective(log_T: float) -> float:
