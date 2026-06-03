@@ -69,3 +69,16 @@ def test_tournament_top10_present():
     data = resp.json()
     assert len(data["top10_champion"]) > 0
     assert "team" in data["top10_champion"][0]
+
+
+def test_scorecard_returns_valid_schema():
+    resp = client.get("/scorecard")
+    # Either 200 (scorecard exists) or 503 (not yet written) is acceptable.
+    assert resp.status_code in (200, 503)
+    if resp.status_code == 200:
+        d = resp.json()
+        assert "as_of_date" in d
+        assert "n_completed" in d
+        assert "temperature" in d
+        assert isinstance(d["matches"], list)
+        assert isinstance(d["models"], dict)

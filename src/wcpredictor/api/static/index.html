@@ -173,6 +173,23 @@
       </table></div>
     </section>
 
+    <!-- Live Scorecard -->
+    <section id="scorecard-section">
+      <h2>Live Scorecard</h2>
+      <div id="scorecard-meta" style="color:#7ab3e0;font-size:0.85rem;margin-bottom:1rem;">Loading…</div>
+      <div class="table-wrap"><table class="data" id="scorecard-table">
+        <thead><tr>
+          <th>Date</th>
+          <th>Match</th>
+          <th>Result</th>
+          <th>Predicted W/D/L</th>
+          <th>Log-loss</th>
+          <th>Brier</th>
+        </tr></thead>
+        <tbody id="scorecard-tbody"><tr><td colspan="6" style="color:#556080;padding:1rem;">Loading…</td></tr></tbody>
+      </table></div>
+    </section>
+
   </main>
 
   <script>
@@ -408,10 +425,45 @@
     });
   });
 
+  // ---- Scorecard ----
+  async function loadScorecard() {
+    const resp = await fetch('/scorecard');
+    if (!resp.ok) {
+      document.getElementById('scorecard-meta').textContent = 'Not yet available (no completed matches).';
+      document.getElementById('scorecard-tbody').innerHTML = '<tr><td colspan="6" style="color:#556080">—</td></tr>';
+      return;
+    }
+    const d = await resp.json();
+    const meta = [
+      `As of: ${d.as_of_date}`,
+      `Matches scored: ${d.n_completed}`,
+      d.log_loss != null ? `Log-loss: ${d.log_loss.toFixed(4)}` : null,
+      d.brier != null ? `Brier: ${d.brier.toFixed(4)}` : null,
+      d.accuracy != null ? `Accuracy: ${pct(d.accuracy)}` : null,
+      `Temperature: ${d.temperature.toFixed(3)}`,
+    ].filter(Boolean).join('  ·  ');
+    document.getElementById('scorecard-meta').textContent = meta;
+
+    const html = d.matches.length ? d.matches.map(m => {
+      const outcome = m.actual_outcome != null ? ['W','D','L'][m.actual_outcome] : '—';
+      const pred = (m.p_win != null) ? `${pct(m.p_win)} / ${pct(m.p_draw)} / ${pct(m.p_loss)}` : '—';
+      return `<tr>
+        <td>${m.date || '—'}</td>
+        <td class="team-name">${m.team_a || ''} vs ${m.team_b || ''}</td>
+        <td>${outcome}</td>
+        <td>${pred}</td>
+        <td>${m.log_loss != null ? m.log_loss.toFixed(4) : '—'}</td>
+        <td>${m.brier != null ? m.brier.toFixed(4) : '—'}</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="6" style="color:#556080">No completed matches yet.</td></tr>';
+    document.getElementById('scorecard-tbody').innerHTML = html;
+  }
+
   // ---- Boot ----
   loadTeams();
   loadFixtures();
   loadTournament();
+  loadScorecard();
   </script>
 </body>
 </html>

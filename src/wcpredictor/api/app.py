@@ -28,10 +28,10 @@ from wcpredictor.config import DATA_PROCESSED, DATA_RAW
 from wcpredictor.data.normalize_teams import canonical
 from wcpredictor.predict import _build_frozen_state, _predict_one_frozen
 
-from .schemas import FixtureRow, PredictResponse, TeamStanding, TournamentResponse
+from .schemas import FixtureRow, PredictResponse, ScorecardResponse, TeamStanding, TournamentResponse
 
 STATIC_DIR = Path(__file__).parent / "static"
-DEFAULT_AS_OF = "2026-06-10"
+DEFAULT_AS_OF = "2026-06-11"
 
 # Module-level cache: (as_of, frozenset(models)) -> frozen state dict
 _STATE_CACHE: dict[tuple[str, frozenset], dict] = {}
@@ -266,6 +266,15 @@ def tournament() -> TournamentResponse:
         standings=standings,
         top10_champion=top10,
     )
+
+
+@app.get("/scorecard", response_model=ScorecardResponse)
+def scorecard() -> ScorecardResponse:
+    path = DATA_PROCESSED / "wc2026_scorecard.json"
+    if not path.exists():
+        raise HTTPException(status_code=503, detail="Scorecard not yet available.")
+    data = json.loads(path.read_text())
+    return ScorecardResponse(**data)
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

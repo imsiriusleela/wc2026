@@ -58,3 +58,16 @@ class TournamentResponse(BaseModel):
     n_sims: int
     standings: list[TeamStanding]
     top10_champion: list[dict[str, Any]]
+
+
+class ScorecardResponse(BaseModel):
+    as_of_date: str
+    n_completed: int
+    log_loss: float | None
+    brier: float | None
+    accuracy: float | None
+    ece_uncal: float | None
+    ece_cal: float | None
+    temperature: float
+    models: dict[str, Any]
+    matches: list[dict[str, Any]]
