@@ -23,6 +23,13 @@
     button#predict-btn:hover { background: #2470cc; }
     button#predict-btn:disabled { background: #1a3a5a; color: #5a7090; cursor: not-allowed; }
 
+    /* Refresh-odds button (header) */
+    .refresh-odds-wrap { margin-left: auto; display: flex; align-items: center; gap: 0.6rem; }
+    button#refresh-odds-btn { background: #1a3a60; color: #9ab0cc; border: 1px solid #2a4a70; border-radius: 6px; padding: 0.35rem 0.9rem; font-size: 0.82rem; cursor: pointer; font-weight: 500; transition: background 0.15s; white-space: nowrap; }
+    button#refresh-odds-btn:hover { background: #234a80; color: #c8d8ea; }
+    button#refresh-odds-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    #refresh-status { font-size: 0.8rem; color: #7090c0; max-width: 360px; }
+
     .result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
 
     .prob-bars { background: #0e1f38; border-radius: 8px; padding: 1rem; }
@@ -93,6 +100,10 @@
   <header>
     <h1>⚽ WC 2026 Predictor</h1>
     <span>Match predictions · Tournament simulation</span>
+    <div class="refresh-odds-wrap">
+      <button id="refresh-odds-btn">↻ Refresh odds</button>
+      <span id="refresh-status"></span>
+    </div>
   </header>
   <main>
 
@@ -458,6 +469,44 @@
     }).join('') : '<tr><td colspan="6" style="color:#556080">No completed matches yet.</td></tr>';
     document.getElementById('scorecard-tbody').innerHTML = html;
   }
+
+  // ---- Refresh odds ----
+  document.getElementById('refresh-odds-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('refresh-odds-btn');
+    const status = document.getElementById('refresh-status');
+    btn.disabled = true;
+    status.style.color = '#7090c0';
+    status.textContent = 'Refreshing odds…';
+    try {
+      const resp = await fetch('/refresh-odds', { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        status.style.color = '#ff6680';
+        status.textContent = data.detail || resp.statusText;
+        return;
+      }
+      if (data.n_odds_2026 > 0) {
+        status.style.color = '#22aa66';
+        status.textContent = `✓ ${data.n_odds_2026} WC 2026 matches priced — predictions now use market odds.`;
+      } else {
+        status.style.color = '#cc8800';
+        status.textContent = 'Refreshed — no WC 2026 odds published yet.';
+      }
+      if (data.sha_changed) {
+        status.textContent += ' File changed — re-pin SHA in config.py.';
+      }
+      // Re-run prediction if one is already showing so effect is visible
+      const result = document.getElementById('predict-result');
+      if (result && result.children.length > 0 && !result.querySelector('.error-msg')) {
+        document.getElementById('predict-btn').click();
+      }
+    } catch (e) {
+      status.style.color = '#ff6680';
+      status.textContent = `Error: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   // ---- Boot ----
   loadTeams();

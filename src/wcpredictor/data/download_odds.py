@@ -24,8 +24,12 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def download_odds(force: bool = False) -> Path:
-    """Fetch WorldCup_fdco.xlsx to data/raw/; skip if already present and hash matches."""
+def download_odds(force: bool = False, verify: bool = True) -> Path:
+    """Fetch WorldCup_fdco.xlsx to data/raw/; skip if already present and hash matches.
+
+    verify=False: download and save even if the SHA differs from the pinned value.
+    Use this for on-demand refresh (the new SHA is surfaced to the caller for re-pinning).
+    """
     DATA_RAW.mkdir(parents=True, exist_ok=True)
 
     if _DEST.exists() and not force:
@@ -43,6 +47,12 @@ def download_odds(force: bool = False) -> Path:
 
     actual = _sha256(_DEST)
     if actual != FDCO_ODDS_SHA256:
+        if not verify:
+            print(
+                f"SHA-256 changed: {actual} (pinned: {FDCO_ODDS_SHA256})"
+                " — file saved; re-pin FDCO_ODDS_SHA256 in config.py for reproducibility."
+            )
+            return _DEST
         _DEST.unlink()
         raise RuntimeError(
             f"SHA-256 mismatch after download.\n"

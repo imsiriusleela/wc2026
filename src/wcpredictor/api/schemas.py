@@ -71,3 +71,13 @@ class ScorecardResponse(BaseModel):
     temperature: float
     models: dict[str, Any]
     matches: list[dict[str, Any]]
+
+
+class RefreshOddsResponse(BaseModel):
+    status: str
+    n_odds_2026: int
+    file_sha256: str
+    pinned_sha256: str
+    sha_changed: bool
+    state_cache_cleared: bool
+    note: str

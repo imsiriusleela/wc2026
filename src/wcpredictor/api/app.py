@@ -1,20 +1,23 @@
 """FastAPI application for the World Cup predictor.
 
 Endpoints:
-  GET /health             - liveness check
-  GET /teams              - sorted list of known teams
-  GET /predict            - live single-match prediction (cached frozen state)
-  GET /fixtures           - precomputed fixture predictions
-  GET /tournament         - precomputed tournament simulation
-  GET /                   - static frontend (index.html)
+  GET  /health             - liveness check
+  GET  /teams              - sorted list of known teams
+  GET  /predict            - live single-match prediction (cached frozen state)
+  GET  /fixtures           - precomputed fixture predictions
+  GET  /tournament         - precomputed tournament simulation
+  POST /refresh-odds       - pull fresh fdco odds file and clear prediction cache
+  GET  /                   - static frontend (index.html)
 """
 from __future__ import annotations
 
 import ast
 import glob
+import hashlib
 import json
 import math
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -24,17 +27,22 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from wcpredictor.config import DATA_PROCESSED, DATA_RAW
+from wcpredictor.config import DATA_PROCESSED, DATA_RAW, FDCO_ODDS_SHA256
+from wcpredictor.data.download_odds import download_odds
 from wcpredictor.data.normalize_teams import canonical
+from wcpredictor.features.odds import load_wc_odds
 from wcpredictor.predict import _build_frozen_state, _predict_one_frozen
 
-from .schemas import FixtureRow, PredictResponse, ScorecardResponse, TeamStanding, TournamentResponse
+from .schemas import FixtureRow, PredictResponse, RefreshOddsResponse, ScorecardResponse, TeamStanding, TournamentResponse
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_AS_OF = "2026-06-11"
 
 # Module-level cache: (as_of, frozenset(models)) -> frozen state dict
 _STATE_CACHE: dict[tuple[str, frozenset], dict] = {}
+
+# Guards concurrent calls to POST /refresh-odds
+_REFRESH_LOCK = threading.Lock()
 
 
 def _get_state(as_of: str, models: list[str]) -> dict:
@@ -275,6 +283,64 @@ def scorecard() -> ScorecardResponse:
         raise HTTPException(status_code=503, detail="Scorecard not yet available.")
     data = json.loads(path.read_text())
     return ScorecardResponse(**data)
+
+
+@app.post("/refresh-odds", response_model=RefreshOddsResponse)
+def refresh_odds() -> RefreshOddsResponse:
+    """Pull a fresh copy of the football-data.co.uk odds file.
+
+    Requires an explicit user action (button click) — honors the no-silent-scraping rule.
+    Clears _STATE_CACHE so the next /predict rebuilds with updated odds.
+    Does NOT auto-rewrite config.py; the new SHA is surfaced for manual re-pinning.
+    Note: Fixtures and Tournament tabs use pre-generated snapshots and are not affected.
+    """
+    acquired = _REFRESH_LOCK.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(status_code=409, detail="Refresh already in progress.")
+    try:
+        try:
+            download_odds(force=True, verify=False)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to download odds: {exc}")
+
+        odds_path = DATA_RAW / "WorldCup_fdco.xlsx"
+        actual_sha = hashlib.sha256(odds_path.read_bytes()).hexdigest()
+        sha_changed = actual_sha != FDCO_ODDS_SHA256
+
+        try:
+            odds_df = load_wc_odds()
+            n_odds_2026 = int((odds_df["year"] == 2026).sum()) if "year" in odds_df.columns else 0
+        except Exception:
+            n_odds_2026 = 0
+
+        _STATE_CACHE.clear()
+
+        note_parts: list[str] = []
+        if n_odds_2026 > 0:
+            note_parts.append(f"{n_odds_2026} WC 2026 matches priced — next prediction uses market odds.")
+        else:
+            note_parts.append("No WC 2026 odds published yet.")
+        if sha_changed:
+            note_parts.append(
+                f"File changed (new SHA: {actual_sha[:16]}…). "
+                "Re-pin FDCO_ODDS_SHA256 in config.py for reproducibility."
+            )
+        note_parts.append(
+            "Fixtures and Tournament tabs use pre-generated snapshots; "
+            "re-run predict_fixtures / simulate CLI to update them."
+        )
+
+        return RefreshOddsResponse(
+            status="ok",
+            n_odds_2026=n_odds_2026,
+            file_sha256=actual_sha,
+            pinned_sha256=FDCO_ODDS_SHA256,
+            sha_changed=sha_changed,
+            state_cache_cleared=True,
+            note=" ".join(note_parts),
+        )
+    finally:
+        _REFRESH_LOCK.release()
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

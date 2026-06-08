@@ -82,3 +82,59 @@ def test_scorecard_returns_valid_schema():
         assert "temperature" in d
         assert isinstance(d["matches"], list)
         assert isinstance(d["models"], dict)
+
+
+# ---- /refresh-odds tests ----
+
+def test_refresh_odds_with_2026_rows(monkeypatch, tmp_path):
+    import pandas as pd
+    import wcpredictor.api.app as app_module
+
+    fake_xlsx = tmp_path / "WorldCup_fdco.xlsx"
+    fake_xlsx.write_bytes(b"fake-content-for-sha")
+
+    monkeypatch.setattr(app_module, "download_odds", lambda force=False, verify=True: fake_xlsx)
+    monkeypatch.setattr(app_module, "DATA_RAW", tmp_path)
+    sample = pd.DataFrame({"year": [2026, 2026, 2022], "home": ["A", "B", "C"], "away": ["B", "C", "D"]})
+    monkeypatch.setattr(app_module, "load_wc_odds", lambda: sample)
+
+    app_module._STATE_CACHE["sentinel"] = {"dummy": True}
+    resp = client.post("/refresh-odds")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["status"] == "ok"
+    assert d["n_odds_2026"] == 2
+    assert d["state_cache_cleared"] is True
+    assert app_module._STATE_CACHE == {}
+
+
+def test_refresh_odds_no_2026_rows(monkeypatch, tmp_path):
+    import pandas as pd
+    import wcpredictor.api.app as app_module
+
+    fake_xlsx = tmp_path / "WorldCup_fdco.xlsx"
+    fake_xlsx.write_bytes(b"no-2026-data")
+
+    monkeypatch.setattr(app_module, "download_odds", lambda force=False, verify=True: fake_xlsx)
+    monkeypatch.setattr(app_module, "DATA_RAW", tmp_path)
+    sample = pd.DataFrame({"year": [2022, 2018], "home": ["A", "B"], "away": ["C", "D"]})
+    monkeypatch.setattr(app_module, "load_wc_odds", lambda: sample)
+
+    resp = client.post("/refresh-odds")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["n_odds_2026"] == 0
+    assert "no WC 2026 odds" in d["note"].lower() or d["n_odds_2026"] == 0
+
+
+def test_refresh_odds_download_failure(monkeypatch, tmp_path):
+    import wcpredictor.api.app as app_module
+
+    def _fail(**kwargs):
+        raise OSError("network unreachable")
+
+    monkeypatch.setattr(app_module, "download_odds", _fail)
+
+    resp = client.post("/refresh-odds")
+    assert resp.status_code == 502
+    assert "network unreachable" in resp.json()["detail"]
