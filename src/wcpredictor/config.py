@@ -46,6 +46,8 @@ FDCO_ODDS_URL: str = "https://www.football-data.co.uk/WorldCup2026.xlsx"
 # SHA-256 of WorldCup_fdco.xlsx as of 2026-05-28; verify with download_odds.py
 FDCO_ODDS_SHA256: str = "777652ce1a400aabbbb5778f306311f36197b7e382ff87d5077b5a017473ae72"
 ODDS_ALPHA_PRIOR: float = 0.0  # conservative: no market weight until time-aware data supports it
+# Unconstrained pooled fit is ~0.64, driven by WC2022; cap keeps market a low-weight overlay
+ODDS_ALPHA_CAP: float = 0.3
 
 # WC2010 odds from betexplorer.com (one-time Playwright render, user-approved 2026-06-02)
 # Source: betexplorer.com/football/world/world-cup-2010/results/

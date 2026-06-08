@@ -35,6 +35,7 @@ from wcpredictor.config import (
     DATA_PROCESSED,
     DC_CAL_VALIDATION_YEARS,
     ENSEMBLE_POOL,
+    ODDS_ALPHA_CAP,
     ODDS_ALPHA_PRIOR,
 )
 from wcpredictor.data.download import download_results
@@ -464,8 +465,9 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
                     prev_odds_labels, prev_odds_ens_probs, prev_odds_market_probs
                 )
 
+            alpha_effective = min(alpha_odds, ODDS_ALPHA_CAP)
             ens_probs_market = [
-                [(1 - alpha_odds) * e[i] + alpha_odds * m[i] for i in range(3)]
+                [(1 - alpha_effective) * e[i] + alpha_effective * m[i] for i in range(3)]
                 for e, m in zip(ens_probs_cal, market_probs_test)
             ]
 
@@ -475,6 +477,7 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
                     ens_pred_a, ens_pred_b, ens_matrices, ens_top_sc,
                 ),
                 "alpha_odds": round(alpha_odds, 4),
+                "alpha_effective": round(alpha_effective, 4),
             }
 
             # Update rolling collector for the next fold (time-aware, no leakage)
@@ -549,6 +552,7 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
     else:
         odds_alpha_pooled = float(ODDS_ALPHA_PRIOR)
     results["odds_alpha_pooled"] = round(odds_alpha_pooled, 4)
+    results["odds_alpha_effective"] = round(min(odds_alpha_pooled, ODDS_ALPHA_CAP), 4)
 
     # Write per-match CSV for bootstrap model selection
     if permatch_rows:

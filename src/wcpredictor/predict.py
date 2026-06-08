@@ -27,7 +27,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from wcpredictor.config import DATA_PROCESSED, DATA_RAW, INITIAL_RATING
+from wcpredictor.config import DATA_PROCESSED, DATA_RAW, INITIAL_RATING, ODDS_ALPHA_CAP
 from wcpredictor.data.download import download_results
 from wcpredictor.data.load_matches import load_matches
 from wcpredictor.data.normalize_teams import canonical
@@ -38,8 +38,10 @@ from wcpredictor.models.poisson import predict_one as poisson_predict_one
 
 
 def _resolve_odds_alpha() -> float:
-    """Return the calibrated odds-blend weight from the pre-computed backtest report.
+    """Return the effective odds-blend weight, capped at ODDS_ALPHA_CAP.
 
+    Reads odds_alpha_pooled from the backtest report (unconstrained optimum ~0.64),
+    then caps it so the market stays a low-weight calibration overlay, not the driver.
     Falls back to ODDS_ALPHA_PRIOR (0.0) if the report is absent or unreadable.
     """
     from wcpredictor.config import ODDS_ALPHA_PRIOR
@@ -48,7 +50,8 @@ def _resolve_odds_alpha() -> float:
     if _path.exists():
         try:
             report = json.loads(_path.read_text())
-            return float(report.get("odds_alpha_pooled", ODDS_ALPHA_PRIOR))
+            raw = float(report.get("odds_alpha_pooled", ODDS_ALPHA_PRIOR))
+            return min(raw, ODDS_ALPHA_CAP)
         except (KeyError, ValueError, json.JSONDecodeError):
             pass
     return float(ODDS_ALPHA_PRIOR)
