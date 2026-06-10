@@ -288,52 +288,100 @@ def scorecard() -> ScorecardResponse:
 
 @app.post("/refresh-odds", response_model=RefreshOddsResponse)
 def refresh_odds() -> RefreshOddsResponse:
-    """Pull a fresh copy of the football-data.co.uk odds file.
+    """Pull fresh odds from fdco and/or the-odds-api (h2h + AH/O-U).
 
     Requires an explicit user action (button click) — honors the no-silent-scraping rule.
     Clears _STATE_CACHE so the next /predict rebuilds with updated odds.
-    Does NOT auto-rewrite config.py; the new SHA is surfaced for manual re-pinning.
+    One call refreshes both 1X2 (used by ensemble_mkt blend) and AH/O-U (matrix blend)
+    since both read the same odds_api_wc2026.json.
+    Does NOT auto-rewrite config.py; the new fdco SHA is surfaced for manual re-pinning.
     Note: Fixtures and Tournament tabs use pre-generated snapshots and are not affected.
     """
     acquired = _REFRESH_LOCK.acquire(blocking=False)
     if not acquired:
         raise HTTPException(status_code=409, detail="Refresh already in progress.")
     try:
+        from wcpredictor.data.download_odds_api import fetch_odds_api
+
+        note_parts: list[str] = []
+        errors: list[str] = []
+
+        # fdco xlsx — non-fatal
+        actual_sha = ""
+        sha_changed = False
+        fdco_ok = False
         try:
             download_odds(force=True, verify=False)
+            fdco_ok = True
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Failed to download odds: {exc}")
+            errors.append(f"fdco: {exc}")
 
         odds_path = DATA_RAW / "WorldCup_fdco.xlsx"
-        actual_sha = hashlib.sha256(odds_path.read_bytes()).hexdigest()
-        sha_changed = actual_sha != FDCO_ODDS_SHA256
+        if odds_path.exists():
+            actual_sha = hashlib.sha256(odds_path.read_bytes()).hexdigest()
+            sha_changed = actual_sha != FDCO_ODDS_SHA256
 
+        # the-odds-api — non-fatal; also refreshes AH/O-U (same JSON)
+        api_key = os.environ.get("ODDS_API_KEY", "").strip()
+        odds_api_refreshed = False
+        if api_key:
+            try:
+                fetch_odds_api(force=True)
+                odds_api_refreshed = True
+            except Exception as exc:
+                errors.append(f"odds-api: {exc}")
+        else:
+            note_parts.append("ODDS_API_KEY not set — skipped live API refresh.")
+
+        # Count 2026 rows from merged odds (fdco + live JSON)
         try:
             odds_df = load_wc_odds()
-            n_odds_2026 = int((odds_df["year"] == 2026).sum()) if "year" in odds_df.columns else 0
+            n_2026 = int((odds_df["year"] == 2026).sum()) if "year" in odds_df.columns else 0
         except Exception:
-            n_odds_2026 = 0
+            n_2026 = 0
+
+        # Breakdown by source
+        n_fdco = 0
+        n_api = 0
+        try:
+            from wcpredictor.features.odds import load_wc_odds as _lwo_fdco
+            import openpyxl as _opx
+            wb = _opx.load_workbook(odds_path, read_only=True, data_only=True)
+            if "WorldCup2026" in wb.sheetnames:
+                ws = wb["WorldCup2026"]
+                n_fdco = max(0, sum(1 for _ in ws.iter_rows(min_row=2)) - 0)
+            wb.close()
+        except Exception:
+            pass
+        n_api = max(0, n_2026 - n_fdco)
 
         _STATE_CACHE.clear()
 
-        note_parts: list[str] = []
-        if n_odds_2026 > 0:
-            note_parts.append(f"{n_odds_2026} WC 2026 matches priced — next prediction uses market odds.")
+        if n_2026 > 0:
+            note_parts.append(f"{n_2026} WC 2026 matches priced (fdco={n_fdco}, api={n_api}) — next prediction uses market odds.")
         else:
-            note_parts.append("No WC 2026 odds published yet.")
+            note_parts.append("No WC 2026 odds available yet.")
         if sha_changed:
             note_parts.append(
-                f"File changed (new SHA: {actual_sha[:16]}…). "
+                f"fdco file changed (new SHA: {actual_sha[:16]}…). "
                 "Re-pin FDCO_ODDS_SHA256 in config.py for reproducibility."
             )
+        if errors:
+            note_parts.append("Errors: " + "; ".join(errors))
         note_parts.append(
             "Fixtures and Tournament tabs use pre-generated snapshots; "
             "re-run predict_fixtures / simulate CLI to update them."
         )
 
+        if errors and n_2026 == 0:
+            raise HTTPException(status_code=502, detail=" ".join(note_parts))
+
         return RefreshOddsResponse(
             status="ok",
-            n_odds_2026=n_odds_2026,
+            n_odds_2026=n_2026,
+            n_odds_2026_fdco=n_fdco,
+            n_odds_2026_api=n_api,
+            odds_api_refreshed=odds_api_refreshed,
             file_sha256=actual_sha,
             pinned_sha256=FDCO_ODDS_SHA256,
             sha_changed=sha_changed,

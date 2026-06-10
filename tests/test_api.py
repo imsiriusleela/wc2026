@@ -127,14 +127,38 @@ def test_refresh_odds_no_2026_rows(monkeypatch, tmp_path):
     assert "no WC 2026 odds" in d["note"].lower() or d["n_odds_2026"] == 0
 
 
-def test_refresh_odds_download_failure(monkeypatch, tmp_path):
+def test_refresh_odds_fdco_failure_non_fatal(monkeypatch, tmp_path):
+    """fdco download failure should not abort; breakdown fields must be present."""
+    import pandas as pd
+    import wcpredictor.api.app as app_module
+
+    # fdco raises but we still have API odds
+    monkeypatch.setattr(app_module, "download_odds", lambda force=False, verify=True: (_ for _ in ()).throw(RuntimeError("fdco down")))
+    monkeypatch.setattr(app_module, "DATA_RAW", tmp_path)
+    sample = pd.DataFrame({"year": [2026, 2026], "team_a": ["A", "B"], "team_b": ["B", "C"]})
+    monkeypatch.setattr(app_module, "load_wc_odds", lambda: sample)
+
+    resp = client.post("/refresh-odds")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert "n_odds_2026_fdco" in d
+    assert "n_odds_2026_api" in d
+    assert "odds_api_refreshed" in d
+    assert "fdco" in d["note"].lower() or "error" in d["note"].lower()
+
+
+def test_refresh_odds_both_sources_fail_returns_502(monkeypatch, tmp_path):
+    """Both fdco and odds-api fail with no cached odds → 502."""
+    import pandas as pd
     import wcpredictor.api.app as app_module
 
     def _fail(**kwargs):
         raise OSError("network unreachable")
 
     monkeypatch.setattr(app_module, "download_odds", _fail)
+    monkeypatch.setattr(app_module, "DATA_RAW", tmp_path)
+    # No odds from any source
+    monkeypatch.setattr(app_module, "load_wc_odds", lambda: pd.DataFrame({"year": [2022]}))
 
     resp = client.post("/refresh-odds")
     assert resp.status_code == 502
-    assert "network unreachable" in resp.json()["detail"]

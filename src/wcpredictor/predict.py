@@ -296,7 +296,7 @@ def _build_odds_lookup(
     lookup: dict = {}
     if odds_df.empty or "year" not in odds_df.columns:
         return lookup
-    yr2026 = odds_df[odds_df["year"] == 2026]
+    yr2026 = odds_df[odds_df["year"] == 2026].sort_values("date")
     for _, r in yr2026.iterrows():
         ta, tb = str(r.team_a), str(r.team_b)
         lookup[(ta, tb)] = (float(r.p_win), float(r.p_draw), float(r.p_loss))
@@ -385,7 +385,8 @@ def predict_match(
 
         if not (DATA_RAW / "WorldCup_fdco.xlsx").exists():
             download_odds()
-        elo_df = merge_odds_features(elo_df, load_wc_odds())
+        _wc_odds_df = load_wc_odds()
+        elo_df = merge_odds_features(elo_df, _wc_odds_df)
 
         cal_start = cutoff - pd.DateOffset(years=DC_CAL_VALIDATION_YEARS)
 
@@ -462,6 +463,12 @@ def predict_match(
 
         fr = _form_row(form_state, team_a, team_b, cutoff)
         import math as _math
+        odds_lookup = _build_odds_lookup(_wc_odds_df)
+        _odds_entry = odds_lookup.get((team_a, team_b))
+        if _odds_entry:
+            _odds_pw, _odds_pd, _odds_pl, _has_odds = _odds_entry[0], _odds_entry[1], _odds_entry[2], 1.0
+        else:
+            _odds_pw, _odds_pd, _odds_pl, _has_odds = _math.nan, _math.nan, _math.nan, 0.0
         test_row = pd.DataFrame({
             "elo_diff_adj": [elo_diff_adj],
             "neutral": [neutral],
@@ -470,11 +477,10 @@ def predict_match(
             "rest_diff": [fr["rest_diff"]],
             "elo_a_pre": [r_a],
             "elo_b_pre": [r_b],
-            # Odds are NaN until WC2026 odds are fetched (Part B)
-            "odds_p_win": [_math.nan],
-            "odds_p_draw": [_math.nan],
-            "odds_p_loss": [_math.nan],
-            "has_odds": [0.0],
+            "odds_p_win": [_odds_pw],
+            "odds_p_draw": [_odds_pd],
+            "odds_p_loss": [_odds_pl],
+            "has_odds": [_has_odds],
         })
         p_log_proba = log_predict(log_scaler, log_model, test_row)[0]
         p_tree_proba = tree_predict(tree_model, test_row)[0]
@@ -491,8 +497,7 @@ def predict_match(
 
         # Market-odds blending for ensemble_mkt
         if model == "ensemble_mkt":
-            odds_lookup_single = _build_odds_lookup(load_wc_odds())
-            _odds_entry = odds_lookup_single.get((team_a, team_b))
+            _odds_entry = odds_lookup.get((team_a, team_b))
             if _odds_entry:
                 _alpha = _resolve_odds_alpha()
                 _blended = [(1 - _alpha) * combined_cal[i] + _alpha * _odds_entry[i] for i in range(3)]
@@ -616,7 +621,7 @@ def _build_frozen_state(
         odds_df = load_wc_odds()
         elo_all = merge_odds_features(elo_df, odds_df)
 
-        # Build odds lookup for 2026 fixtures (populated once WC2026 sheet is live)
+        # Build odds lookup for 2026 fixtures (live JSON or fdco sheet, whichever is available)
         state["odds_lookup"] = _build_odds_lookup(odds_df)
 
         cal_start = cutoff - pd.DateOffset(years=DC_CAL_VALIDATION_YEARS)

@@ -1,8 +1,13 @@
-"""Parse football-data.co.uk WC xlsx → margin-normalised implied probabilities.
+"""Parse football-data.co.uk WC xlsx and the-odds-api h2h JSON → margin-normalised
+implied 1X2 probabilities.
 
 The xlsx (WorldCup_fdco.xlsx) contains sheets WorldCup2014 / 2018 / 2022, each
 with 64 rows (one per match) and columns including H-Avg, D-Avg, A-Avg (the
 market-average decimal odds across bookmakers).
+
+The live 2026 source is data/raw/odds_api_wc2026.json (the-odds-api.com h2h market,
+median across bookmakers).  fdco takes per-match precedence if the WorldCup2026 sheet
+ever appears; absent that sheet, all 2026 rows come from the live JSON.
 
 We remove the bookmaker margin by normalising:
     p_i = (1/o_i) / sum(1/o_j for j in {H,D,A})
@@ -39,17 +44,30 @@ def _implied_probs(h: float, d: float, a: float) -> tuple[float, float, float]:
     return p_h / total, p_d / total, p_a / total
 
 
-def load_wc_odds(xlsx_path: Path | None = None) -> pd.DataFrame:
+def load_wc_odds(
+    xlsx_path: Path | None = None,
+    live_json_path: Path | None = None,
+) -> pd.DataFrame:
     """Return DataFrame with columns:
         year, date, team_a, team_b, p_win, p_draw, p_loss
 
     p_win  = implied prob that team_a wins in 90 min.
     p_loss = implied prob that team_b wins in 90 min.
 
-    Covers WC 2010 (betexplorer CSV), 2014, 2018, 2022 (football-data.co.uk xlsx).
+    Covers WC 2010 (betexplorer CSV), 2014, 2018, 2022 (football-data.co.uk xlsx),
+    and 2026 (the-odds-api h2h when odds_api_wc2026.json is present, or fdco
+    WorldCup2026 sheet — fdco takes per-match precedence when both exist).
+
+    Parameters
+    ----------
+    xlsx_path      : path to WorldCup_fdco.xlsx (default: DATA_RAW/WorldCup_fdco.xlsx).
+    live_json_path : path to odds_api_wc2026.json (default: DATA_RAW/odds_api_wc2026.json).
+                     Pass a non-existent path to suppress live-JSON loading (tests).
     """
     if xlsx_path is None:
         xlsx_path = DATA_RAW / "WorldCup_fdco.xlsx"
+    if live_json_path is None:
+        live_json_path = DATA_RAW / "odds_api_wc2026.json"
 
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
     records: list[dict] = []
@@ -124,6 +142,31 @@ def load_wc_odds(xlsx_path: Path | None = None) -> pd.DataFrame:
         df2010["year"] = 2010
         df2010 = df2010[["year", "date", "team_a", "team_b", "p_win", "p_draw", "p_loss"]]
         df_xlsx = pd.concat([df2010, df_xlsx], ignore_index=True)
+
+    # Append 2026 live 1X2 odds from the-odds-api (fdco takes per-match precedence)
+    if live_json_path.exists():
+        try:
+            import json as _json
+            from wcpredictor.data.download_odds_api import parse_h2h_1x2
+            raw = _json.loads(live_json_path.read_text())
+            df_live = parse_h2h_1x2(raw)
+            if not df_live.empty:
+                # Build frozenset pairs from fdco 2026 rows (symmetric dedup)
+                fdco_2026_pairs: set[frozenset] = set()
+                if "year" in df_xlsx.columns and not df_xlsx.empty:
+                    for _, r in df_xlsx[df_xlsx["year"] == 2026].iterrows():
+                        fdco_2026_pairs.add(frozenset((str(r.team_a), str(r.team_b))))
+                if fdco_2026_pairs:
+                    df_live = df_live[
+                        df_live.apply(
+                            lambda r: frozenset((r.team_a, r.team_b)) not in fdco_2026_pairs,
+                            axis=1,
+                        )
+                    ]
+                if not df_live.empty:
+                    df_xlsx = pd.concat([df_xlsx, df_live], ignore_index=True)
+        except (ValueError, OSError):
+            pass  # corrupt or missing JSON — degrade gracefully
 
     return df_xlsx
 

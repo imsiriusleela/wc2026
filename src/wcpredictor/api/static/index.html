@@ -177,8 +177,10 @@
           <th data-col="lambda_b">xG B</th>
           <th data-col="elo_a">Elo A</th>
           <th data-col="elo_b">Elo B</th>
+          <th data-col="ah_fair_line">Fair AH (A)</th>
+          <th data-col="total_fair_line">Fair O/U</th>
         </tr></thead>
-        <tbody id="fixtures-tbody"><tr><td colspan="11" style="color:#556080;padding:1rem;">Loading…</td></tr></tbody>
+        <tbody id="fixtures-tbody"><tr><td colspan="13" style="color:#556080;padding:1rem;">Loading…</td></tr></tbody>
       </table></div>
     </section>
 
@@ -429,6 +431,10 @@
   async function loadFixtures() {
     const resp = await fetch('/fixtures');
     _fixturesData = await resp.json();
+    _fixturesData.forEach(r => {
+      r.ah_fair_line = r.markets ? r.markets.ah_fair_line : null;
+      r.total_fair_line = r.markets ? r.markets.total_fair_line : null;
+    });
     renderFixtures();
   }
 
@@ -461,9 +467,11 @@
       <td>${fmt2(r.lambda_b)}</td>
       <td>${elo_fmt(r.elo_a)}</td>
       <td>${elo_fmt(r.elo_b)}</td>
+      <td>${r.markets ? fmtLine(r.markets.ah_fair_line) : '—'}</td>
+      <td>${r.markets ? r.markets.total_fair_line : '—'}</td>
     </tr>`).join('');
 
-    document.getElementById('fixtures-tbody').innerHTML = html || '<tr><td colspan="11" style="color:#556080">No data.</td></tr>';
+    document.getElementById('fixtures-tbody').innerHTML = html || '<tr><td colspan="13" style="color:#556080">No data.</td></tr>';
   }
 
   document.getElementById('fixtures-model-sel').addEventListener('change', renderFixtures);

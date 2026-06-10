@@ -68,3 +68,39 @@ The ensemble adds two more blocks:
 | mean | 0.9803 | 0.9995 | 0.9780 | **0.9691** | — |
 
 Bootstrap model selection (10 000 resamples, 256 matched pairs): Ens+Mkt vs Ens+Cal Δ=−0.0089, 95% CI [−0.0186, −0.0016] entirely negative; P(Ens+Mkt better)=99.5%. Default promoted to `"ensemble_mkt"`. Market blend uses time-aware α fit on past WC folds; auto-degrades to ens_cal when 2026 odds are unavailable (pre–2026-06-09 window).
+
+## Kickoff-day runbook (2026)
+
+### One-time setup
+```bash
+export ODDS_API_KEY=<your-key>    # from the-odds-api.com
+```
+
+### Near kickoff — refresh closing lines
+```bash
+# Refreshes 1X2 odds (ensemble_mkt blend) + AH/O-U (matrix blend) in one call.
+# Archives the prior JSON snapshot before overwriting.
+curl -s -X POST localhost:8001/refresh-odds | jq
+# Expected: n_odds_2026==72, odds_api_refreshed==true, HTTP 200
+```
+
+### Regenerate Fixtures / Tournament snapshots
+After refreshing odds, the `/predict` endpoint updates immediately (cache cleared).
+To update the Fixtures and Tournament tabs (pre-generated snapshots), re-run:
+```bash
+uv run python -m wcpredictor.data.predict_fixtures --as-of 2026-06-11
+uv run python -m wcpredictor.cli simulate --as-of 2026-06-11 --n-sims 20000 --seed 42
+```
+
+### Knockout stage
+When group-stage results are known, the API returns knockout matches with real team names.
+Run another `curl -X POST localhost:8001/refresh-odds` to pick them up; placeholder events
+("Winner Group A") are skipped until names are resolved.
+
+### If fdco publishes the WorldCup2026 sheet
+The `/refresh-odds` response surfaces the new SHA in `file_sha256`.
+Re-pin `FDCO_ODDS_SHA256` in `config.py` and commit; fdco rows then take per-match
+precedence over the API automatically — no code change needed.
+
+### API quota note
+One `/refresh-odds` call consumes one the-odds-api request (metered free tier).

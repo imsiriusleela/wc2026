@@ -78,7 +78,10 @@ class ScorecardResponse(BaseModel):
 class RefreshOddsResponse(BaseModel):
     status: str
     n_odds_2026: int
-    file_sha256: str
+    n_odds_2026_fdco: int = 0
+    n_odds_2026_api: int = 0
+    odds_api_refreshed: bool = False
+    file_sha256: str = ""
     pinned_sha256: str
     sha_changed: bool
     state_cache_cleared: bool

@@ -1,0 +1,102 @@
+[
+  {
+    "id": "event1",
+    "commence_time": "2026-06-11T18:00:00Z",
+    "home_team": "USA",
+    "away_team": "Bosnia & Herzegovina",
+    "bookmakers": [
+      {
+        "key": "book1",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "USA", "price": 1.80},
+              {"name": "Draw", "price": 3.50},
+              {"name": "Bosnia & Herzegovina", "price": 4.20}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "book2",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "USA", "price": 1.90},
+              {"name": "Draw", "price": 3.40},
+              {"name": "Bosnia & Herzegovina", "price": 4.00}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "book3",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "USA", "price": 1.85},
+              {"name": "Draw", "price": 3.45},
+              {"name": "Bosnia & Herzegovina", "price": 4.10}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "book4_two_way",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "USA", "price": 1.75},
+              {"name": "Bosnia & Herzegovina", "price": 3.80}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "event2_totals_only",
+    "commence_time": "2026-06-12T18:00:00Z",
+    "home_team": "Brazil",
+    "away_team": "Mexico",
+    "bookmakers": [
+      {
+        "key": "book1",
+        "markets": [
+          {
+            "key": "totals",
+            "outcomes": [
+              {"name": "Over", "point": 2.5, "price": 1.80},
+              {"name": "Under", "point": 2.5, "price": 2.00}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "event3_placeholder",
+    "commence_time": "2026-07-01T18:00:00Z",
+    "home_team": "Winner Group A",
+    "away_team": "Runner-up Group B",
+    "bookmakers": [
+      {
+        "key": "book1",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "Winner Group A", "price": 1.90},
+              {"name": "Draw", "price": 3.40},
+              {"name": "Runner-up Group B", "price": 4.00}
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]
