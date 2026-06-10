@@ -18,3 +18,12 @@ data/processed/
 
 # pytest
 .pytest_cache/
+
+# Playwright MCP tooling
+.playwright-mcp/
+
+# Agent memory store (do not commit)
+memory/
+
+# Claude Code local settings
+.claude/settings.local.json

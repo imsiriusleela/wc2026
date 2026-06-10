@@ -9,10 +9,21 @@ import pytest
 from wcpredictor.models.logistic import fit, predict_proba
 
 
-def _make_df(elo_diffs: list[float], neutral: list[bool] | None = None) -> pd.DataFrame:
+def _make_df(
+    elo_diffs: list[float],
+    neutral: list[bool] | None = None,
+    with_form: bool = True,
+) -> pd.DataFrame:
     if neutral is None:
         neutral = [True] * len(elo_diffs)
-    return pd.DataFrame({"elo_diff_adj": elo_diffs, "neutral": neutral})
+    n = len(elo_diffs)
+    data: dict = {"elo_diff_adj": elo_diffs, "neutral": neutral}
+    if with_form:
+        rng = np.random.default_rng(0)
+        data["form_diff"] = rng.uniform(-1.5, 1.5, n).tolist()
+        data["momentum_diff"] = rng.uniform(-2.0, 2.0, n).tolist()
+        data["rest_diff"] = rng.uniform(-20.0, 20.0, n).tolist()
+    return pd.DataFrame(data)
 
 
 def _make_labels(elo_diffs: list[float], seed: int = 0) -> list[int]:
@@ -58,14 +69,15 @@ def test_predict_on_subset():
 # ── monotonicity in elo_diff_adj ──────────────────────────────────────────────
 
 def test_win_prob_monotone_in_elo_diff():
-    """Higher elo_diff_adj → higher p_win (team_a favored)."""
+    """Higher elo_diff_adj → higher p_win (team_a favored), form held at 0."""
     diffs_train = np.linspace(-400, 400, 300).tolist()
     df_train = _make_df(diffs_train)
     labels = _make_labels(diffs_train)
     scaler, model = fit(df_train, labels)
 
     test_diffs = [-200.0, -100.0, 0.0, 100.0, 200.0]
-    probs = predict_proba(scaler, model, _make_df(test_diffs))
+    # Hold form features at 0 so only elo_diff_adj varies
+    probs = predict_proba(scaler, model, _make_df(test_diffs, with_form=False))
     p_wins = [row[0] for row in probs]
     p_losses = [row[2] for row in probs]
 
@@ -109,3 +121,54 @@ def test_neutral_flag_accepted():
     # Outputs should differ (neutral flag has an effect) — just check validity
     for row in probs_n + probs_nn:
         assert abs(sum(row) - 1.0) < 1e-6
+
+
+# ── absent form columns default to 0.0 ───────────────────────────────────────
+
+def test_absent_form_columns_default_zero():
+    """_build_X works when form columns are missing; defaults to 0.0."""
+    diffs_train = np.linspace(-300, 300, 100).tolist()
+    df_full = _make_df(diffs_train, with_form=True)
+    df_no_form = _make_df(diffs_train, with_form=False)
+    labels = _make_labels(diffs_train)
+
+    scaler_full, model_full = fit(df_full, labels)
+    scaler_bare, model_bare = fit(df_no_form, labels)
+
+    # Predict with the bare-trained model on bare data — should work without KeyError
+    probs = predict_proba(scaler_bare, model_bare, df_no_form)
+    assert len(probs) == 100
+    for row in probs:
+        assert abs(sum(row) - 1.0) < 1e-6
+
+    # Predict with the full-trained model on bare data (form cols absent → 0.0)
+    probs_zero = predict_proba(scaler_full, model_full, df_no_form)
+    assert len(probs_zero) == 100
+    for row in probs_zero:
+        assert abs(sum(row) - 1.0) < 1e-6
+
+
+# ── monotonicity with form held constant ─────────────────────────────────────
+
+def test_win_prob_monotone_with_form_held_constant():
+    """With form_diff/momentum_diff/rest_diff fixed at 0, win prob still monotone in elo_diff."""
+    diffs_train = np.linspace(-400, 400, 300).tolist()
+    df_train = _make_df(diffs_train, with_form=True)
+    labels = _make_labels(diffs_train)
+    scaler, model = fit(df_train, labels)
+
+    test_diffs = [-200.0, -100.0, 0.0, 100.0, 200.0]
+    df_test = pd.DataFrame({
+        "elo_diff_adj": test_diffs,
+        "neutral": [True] * 5,
+        "form_diff": [0.0] * 5,
+        "momentum_diff": [0.0] * 5,
+        "rest_diff": [0.0] * 5,
+    })
+    probs = predict_proba(scaler, model, df_test)
+    p_wins = [row[0] for row in probs]
+    p_losses = [row[2] for row in probs]
+
+    for i in range(len(p_wins) - 1):
+        assert p_wins[i] < p_wins[i + 1], f"p_win not increasing at i={i}"
+        assert p_losses[i] > p_losses[i + 1], f"p_loss not decreasing at i={i}"
