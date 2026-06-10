@@ -27,10 +27,11 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from wcpredictor.config import DATA_PROCESSED, DATA_RAW, INITIAL_RATING, ODDS_ALPHA_CAP
+from wcpredictor.config import DATA_PROCESSED, DATA_RAW, INITIAL_RATING, ODDS_ALPHA_CAP, TOURNAMENT_START
 from wcpredictor.data.download import download_results
 from wcpredictor.data.load_matches import load_matches
 from wcpredictor.data.normalize_teams import canonical
+from wcpredictor.data.results_2026 import augment_matches
 from wcpredictor.features.elo import compute_elo, latest_elo
 from wcpredictor.features.form import compute_form, form_row as _form_row
 from wcpredictor.models.poisson import fit as poisson_fit
@@ -611,28 +612,44 @@ def predict_match(
 def _build_frozen_state(
     as_of_date: str,
     models: list[str],
+    fit_cutoff: str | None = None,
 ) -> dict:
     """Load data and fit all requested models once at the given cutoff.
 
-    Returns a state dict with pre-fitted model artifacts.  Subsequent calls to
-    _predict_one_frozen() use this state directly without any re-fitting.
+    Two cutoff dates are used:
+    - rating_cutoff: advances with as_of_date; Elo/form roll forward with played results.
+    - fit_cutoff:    pinned at TOURNAMENT_START (or min of as_of, TOURNAMENT_START);
+                     all model fits (Poisson, DC, logistic, GBM, calibration) use only
+                     pre-tournament history — no rolling refits during the tournament.
+
+    This mirrors the validated backtest configuration (backtest.py:9).
     """
     _ensure_data()
-    cutoff = pd.Timestamp(as_of_date)
+    rating_cutoff = pd.Timestamp(as_of_date)
+    fc = pd.Timestamp(fit_cutoff) if fit_cutoff else pd.Timestamp(TOURNAMENT_START)
+    # min() ensures pre-tournament calls (as_of <= TOURNAMENT_START) are byte-identical
+    fit_cutoff_ts = min(fc, rating_cutoff)
 
-    matches = load_matches()
-    train = matches[matches["date"] < cutoff].copy()
+    # Augment historical matches with any played WC2026 results (empty before tournament)
+    matches = augment_matches(load_matches())
+    rating_train = matches[matches["date"] < rating_cutoff].copy()
+    fit_train = matches[matches["date"] < fit_cutoff_ts].copy()
 
-    elo_df, final_ratings = compute_elo(train)
-    form_df, form_state = compute_form(train)
+    # Elo/form roll forward with rating_cutoff
+    elo_df, final_ratings = compute_elo(rating_train)
+    form_df, form_state = compute_form(rating_train)
     elo_df = elo_df.merge(form_df, on="match_id", how="left")
-    ratings = latest_elo(elo_df, before_date=cutoff, final_ratings=final_ratings)
+    ratings = latest_elo(elo_df, before_date=rating_cutoff, final_ratings=final_ratings)
+
+    # fit_elo: Elo rows for the pinned fit window only
+    fit_elo_df = elo_df[elo_df["date"] < fit_cutoff_ts].copy()
 
     state: dict = {
-        "cutoff": cutoff,
-        "train": train,
-        "elo_df": elo_df,
-        "ratings": ratings,
+        "cutoff": rating_cutoff,        # used by _predict_one_frozen for form row lookup
+        "fit_cutoff": fit_cutoff_ts,
+        "train": fit_train,             # kept for DC fit reference
+        "elo_df": fit_elo_df,           # Poisson/logistic/GBM features — pinned window
+        "ratings": ratings,             # rolled forward to rating_cutoff
         "form_state": form_state,
     }
 
@@ -640,13 +657,13 @@ def _build_frozen_state(
     needs_dc = "dixon_coles" in models or "ensemble" in models or "ensemble_mkt" in models
 
     if needs_poisson:
-        base, beta = poisson_fit(elo_df)
+        base, beta = poisson_fit(fit_elo_df)
         state["poisson_base"] = base
         state["poisson_beta"] = beta
 
     if needs_dc:
         from wcpredictor.models.dixon_coles import fit as dc_fit
-        state["dc_params"] = dc_fit(train, ref_date=cutoff)
+        state["dc_params"] = dc_fit(fit_train, ref_date=fit_cutoff_ts)
 
     if "ensemble" in models or "ensemble_mkt" in models:
         from wcpredictor.config import DC_CAL_VALIDATION_YEARS, ENSEMBLE_POOL
@@ -669,21 +686,21 @@ def _build_frozen_state(
             download_odds()
 
         odds_df = load_wc_odds()
-        elo_all = merge_odds_features(elo_df, odds_df)
+        elo_all = merge_odds_features(fit_elo_df, odds_df)
 
         # Build odds lookup for 2026 fixtures (live JSON or fdco sheet, whichever is available)
         state["odds_lookup"] = _build_odds_lookup(odds_df)
 
-        cal_start = cutoff - pd.DateOffset(years=DC_CAL_VALIDATION_YEARS)
+        cal_start = fit_cutoff_ts - pd.DateOffset(years=DC_CAL_VALIDATION_YEARS)
         early_elo = elo_all[elo_all["date"] < cal_start]
-        early_train = train[train["date"] < cal_start]
+        early_train = fit_train[fit_train["date"] < cal_start]
         early_base, early_beta = poisson_fit(early_elo)
         early_dc = dc_fit(early_train, ref_date=cal_start)
         early_labels = [_lbl(int(r.goals_a), int(r.goals_b)) for _, r in early_elo.iterrows()]
         early_log_scaler, early_log_model = log_fit(early_elo, early_labels)
         early_tree_model = tree_fit(early_elo, early_labels)
 
-        val_elo = elo_all[(elo_all["date"] >= cal_start) & (elo_all["date"] < cutoff)]
+        val_elo = elo_all[(elo_all["date"] >= cal_start) & (elo_all["date"] < fit_cutoff_ts)]
         val_labels_e: list[int] = []
         val_p_poi: list[list[float]] = []
         val_p_dc: list[list[float]] = []
@@ -702,10 +719,10 @@ def _build_frozen_state(
             if len(val_elo) > 0 else []
         )
 
-        past_wcs = [w for w, s in _WC_START.items() if pd.Timestamp(s) < cutoff]
+        past_wcs = [w for w, s in _WC_START.items() if pd.Timestamp(s) < fit_cutoff_ts]
         eff_year = max(past_wcs) + 1 if past_wcs else min(_WC_START)
         wc_val_labels, wc_val_member_probs = build_wc_stacking_validation(
-            eff_year, train, elo_all
+            eff_year, fit_train, elo_all
         )
         member_val = [val_p_poi, val_p_dc, val_p_log, val_p_tree]
         if wc_val_labels:
@@ -965,9 +982,11 @@ def predict_fixtures(
 
     as_of = pd.Timestamp(as_of_date)
     fixtures = pd.read_csv(fixtures_path, parse_dates=["date"])
-    upcoming = fixtures[fixtures["date"] >= as_of].copy()
+    # Skip fixtures already played (goals filled in) and past dates
+    played = fixtures["goals_a"].notna() & fixtures["goals_b"].notna()
+    upcoming = fixtures[~played & (fixtures["date"] >= as_of)].copy()
 
-    # Fit all models once at the cutoff
+    # Fit all models once at the cutoff; fits pinned at TOURNAMENT_START
     state = _build_frozen_state(as_of_date, model_list)
 
     rows: list[dict] = []

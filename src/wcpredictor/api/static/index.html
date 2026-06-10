@@ -119,7 +119,8 @@
     <h1>⚽ WC 2026 Predictor</h1>
     <span>Match predictions · Tournament simulation · <small style="opacity:0.7">model-led; market odds capped at α≤0.3</small></span>
     <div class="refresh-odds-wrap">
-      <button id="refresh-odds-btn">↻ Refresh odds</button>
+      <button id="refresh-results-btn">↻ Refresh results</button>
+      <button id="refresh-odds-btn" style="margin-left:0.4rem">↻ Refresh odds</button>
       <span id="refresh-status"></span>
     </div>
   </header>
@@ -187,7 +188,12 @@
     <!-- Tournament Leaderboard -->
     <section id="tournament-section">
       <h2>Tournament Simulation</h2>
-      <p class="sort-hint">Click a column header to sort. Click again to reverse.</p>
+      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.8rem;flex-wrap:wrap">
+        <p class="sort-hint" style="margin:0">Click a column header to sort. Click again to reverse.</p>
+        <button id="resimulate-btn" style="background:#1a3a60;color:#9ab0cc;border:1px solid #2a4a70;border-radius:6px;padding:0.35rem 0.9rem;font-size:0.82rem;cursor:pointer;font-weight:500;">↺ Re-simulate</button>
+        <span id="resim-status" style="font-size:0.8rem;color:#7090c0;"></span>
+      </div>
+      <p id="tournament-condition-note" style="font-size:0.8rem;color:#7090c0;margin-bottom:0.7rem;display:none"></p>
       <div class="table-wrap"><table class="data" id="tournament-table">
         <thead><tr>
           <th data-col="team">Team</th>
@@ -535,6 +541,14 @@
     const resp = await fetch('/tournament');
     const data = await resp.json();
     _tournamentData = data.standings;
+    const note = document.getElementById('tournament-condition-note');
+    const ng = data.n_group_fixed || 0, nk = data.n_ko_fixed || 0;
+    if (ng > 0 || nk > 0) {
+      note.textContent = `Conditioned on ${ng} played group match${ng !== 1 ? 'es' : ''} and ${nk} KO result${nk !== 1 ? 's' : ''}.`;
+      note.style.display = '';
+    } else {
+      note.style.display = 'none';
+    }
     renderTournament();
   }
 
@@ -605,6 +619,60 @@
     }).join('') : '<tr><td colspan="6" style="color:#556080">No completed matches yet.</td></tr>';
     document.getElementById('scorecard-tbody').innerHTML = html;
   }
+
+  // ---- Refresh results ----
+  document.getElementById('refresh-results-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('refresh-results-btn');
+    const status = document.getElementById('refresh-status');
+    btn.disabled = true;
+    status.style.color = '#7090c0';
+    status.textContent = 'Refreshing results…';
+    try {
+      const resp = await fetch('/refresh-results', { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        status.style.color = '#ff6680';
+        status.textContent = data.detail || resp.statusText;
+        return;
+      }
+      status.style.color = '#22aa66';
+      status.textContent = `✓ ${data.n_results_total} results (${data.n_new} new, ${data.n_group} group, ${data.n_knockout} KO). ${data.n_fixtures_updated} fixture(s) updated.`;
+      // Reload scorecard
+      loadScorecard();
+    } catch (e) {
+      status.style.color = '#ff6680';
+      status.textContent = `Error: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- Re-simulate ----
+  document.getElementById('resimulate-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('resimulate-btn');
+    const status = document.getElementById('resim-status');
+    btn.disabled = true;
+    status.style.color = '#7090c0';
+    status.textContent = 'Simulating… (1-2 min)';
+    try {
+      const resp = await fetch('/resimulate?n_sims=5000&model=ensemble_mkt', { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        status.style.color = '#ff6680';
+        status.textContent = data.detail || resp.statusText;
+        return;
+      }
+      status.style.color = '#22aa66';
+      status.textContent = `✓ Done — ${data.n_group_fixed} group + ${data.n_ko_fixed} KO results fixed.`;
+      // Reload tournament table
+      loadTournament();
+    } catch (e) {
+      status.style.color = '#ff6680';
+      status.textContent = `Error: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   // ---- Refresh odds ----
   document.getElementById('refresh-odds-btn').addEventListener('click', async () => {

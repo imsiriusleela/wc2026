@@ -16,6 +16,10 @@ RESULTS_URL_FALLBACK = (
     "https://raw.githubusercontent.com/martj42/international_results/master/results.csv"
 )
 
+# Tournament dates
+TOURNAMENT_START: str = "2026-06-11"   # first match date
+KO_START: str = "2026-06-28"           # first R32 date (after all group matches)
+
 # Elo parameters
 INITIAL_RATING: float = 1500.0
 K_MAP: dict[str, float] = {

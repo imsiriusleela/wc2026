@@ -21,16 +21,13 @@ fit on the match being predicted.
 from __future__ import annotations
 
 import json
-import ssl
 import sys
-import urllib.request
-import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from wcpredictor.config import DATA_PROCESSED, DATA_RAW, RESULTS_URL_FALLBACK
+from wcpredictor.config import DATA_PROCESSED, DATA_RAW
 from wcpredictor.evaluation.metrics import accuracy, brier, log_loss
 from wcpredictor.models.calibration import (
     apply as cal_apply,
@@ -55,32 +52,15 @@ def _label(ga: int, gb: int) -> int:
 def _load_latest_results(results_csv: Path | None = None) -> pd.DataFrame:
     """Return all known results up to now.
 
-    If results_csv is provided, use it (user-supplied or existing download).
-    Otherwise try to download martj42 master (RESULTS_URL_FALLBACK).
-    Falls back to the existing local results.csv if the network request fails.
+    Delegates to results_2026.fetch_master_results() which writes results_master.csv
+    (NOT the pinned results.csv) so the reproducibility pin is never overwritten.
     """
-    local = DATA_RAW / "results.csv"
+    from wcpredictor.data.results_2026 import fetch_master_results
 
     if results_csv is not None:
-        df = pd.read_csv(results_csv, parse_dates=["date"])
-        return df
+        return pd.read_csv(results_csv, parse_dates=["date"])
 
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(RESULTS_URL_FALLBACK, context=ctx, timeout=30) as resp:
-            raw = resp.read()
-        local.write_bytes(raw)
-    except Exception as exc:
-        warnings.warn(f"Could not refresh results from martj42 master: {exc}")
-
-    if not local.exists():
-        raise FileNotFoundError(
-            f"results.csv not found at {local}. "
-            "Run: uv run python -m wcpredictor.data.download"
-        )
-    return pd.read_csv(local, parse_dates=["date"])
+    return fetch_master_results()
 
 
 def _load_predictions() -> pd.DataFrame:

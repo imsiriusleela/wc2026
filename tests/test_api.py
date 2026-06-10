@@ -162,3 +162,106 @@ def test_refresh_odds_both_sources_fail_returns_502(monkeypatch, tmp_path):
 
     resp = client.post("/refresh-odds")
     assert resp.status_code == 502
+
+
+# ---- /refresh-results tests ----
+
+def test_refresh_results_returns_ok_on_success(monkeypatch, tmp_path):
+    """POST /refresh-results should return 200 with result counts when network is mocked."""
+    import wcpredictor.api.app as app_module
+    import wcpredictor.data.results_2026 as r26_module
+    import wcpredictor.evaluation.live as live_module
+
+    monkeypatch.setattr(r26_module, "update_wc2026_results",
+                        lambda source_csv=None: {"n_total": 5, "n_new": 3, "n_group": 4, "n_knockout": 1})
+    monkeypatch.setattr(r26_module, "mark_fixtures_played", lambda: 2)
+    monkeypatch.setattr(live_module, "run_refresh", lambda as_of_date: {})
+
+    resp = client.post("/refresh-results")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["status"] == "ok"
+    assert d["n_results_total"] == 5
+    assert d["n_new"] == 3
+    assert d["n_group"] == 4
+    assert d["n_knockout"] == 1
+    assert d["n_fixtures_updated"] == 2
+
+
+def test_refresh_results_non_fatal_on_network_error(monkeypatch):
+    """Network failure in update_wc2026_results must not cause a 5xx — returns 200."""
+    import wcpredictor.data.results_2026 as r26_module
+    import wcpredictor.evaluation.live as live_module
+
+    monkeypatch.setattr(r26_module, "update_wc2026_results",
+                        lambda source_csv=None: (_ for _ in ()).throw(OSError("network down")))
+    monkeypatch.setattr(r26_module, "mark_fixtures_played", lambda: 0)
+    monkeypatch.setattr(live_module, "run_refresh", lambda as_of_date: {})
+
+    resp = client.post("/refresh-results")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert "error" in d["note"].lower() or d["n_results_total"] == 0
+
+
+def test_refresh_results_409_when_locked(monkeypatch):
+    """Concurrent /refresh-results calls must return 409."""
+    import wcpredictor.api.app as app_module
+
+    # Hold the lock
+    app_module._REFRESH_LOCK.acquire()
+    try:
+        resp = client.post("/refresh-results")
+        assert resp.status_code == 409
+    finally:
+        app_module._REFRESH_LOCK.release()
+
+
+# ---- /resimulate tests ----
+
+def test_resimulate_returns_ok(monkeypatch, tmp_path):
+    """POST /resimulate should return 200 with simulation meta."""
+    import pandas as pd
+    import wcpredictor.api.app as app_module
+
+    fake_df = pd.DataFrame([{"team": "Brazil", "p_champion": 0.2}])
+    monkeypatch.setattr(
+        "wcpredictor.simulate.simulate_tournament",
+        lambda *a, **kw: fake_df,
+    )
+    # Write a stub JSON artifact so resimulate can read it
+    as_of = app_module._default_as_of()
+    stub_json = app_module.DATA_PROCESSED / f"wc2026_tournament_sim_{as_of}.json"
+    stub_json.parent.mkdir(parents=True, exist_ok=True)
+    stub_json.write_text('{"n_group_fixed": 3, "n_ko_fixed": 0}')
+
+    resp = client.post("/resimulate?n_sims=100&model=ensemble_mkt")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["status"] == "ok"
+    assert d["n_sims"] == 100
+    assert "n_group_fixed" in d
+    assert "n_ko_fixed" in d
+
+
+def test_resimulate_409_when_locked(monkeypatch):
+    """Concurrent /resimulate calls must return 409."""
+    import wcpredictor.api.app as app_module
+
+    app_module._REFRESH_LOCK.acquire()
+    try:
+        resp = client.post("/resimulate")
+        assert resp.status_code == 409
+    finally:
+        app_module._REFRESH_LOCK.release()
+
+
+def test_tournament_has_condition_fields():
+    """GET /tournament should include n_group_fixed and n_ko_fixed fields."""
+    resp = client.get("/tournament")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert "n_group_fixed" in d
+    assert "n_ko_fixed" in d
+    assert isinstance(d["n_group_fixed"], int)
+    assert isinstance(d["n_ko_fixed"], int)
