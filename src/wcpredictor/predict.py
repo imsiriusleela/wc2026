@@ -57,6 +57,238 @@ def _resolve_odds_alpha() -> float:
     return float(ODDS_ALPHA_PRIOR)
 
 
+def _resolve_ah_alpha() -> float:
+    """Return the effective AH-blend weight, capped at AH_ALPHA_CAP.
+
+    Reads ah_alpha_pooled from the backtest report.  Falls back to AH_ALPHA_PRIOR
+    (0.0) if the report is absent or the field is missing (data not yet available).
+    """
+    from wcpredictor.config import AH_ALPHA_CAP, AH_ALPHA_PRIOR
+
+    _path = DATA_PROCESSED / "backtest_report.json"
+    if _path.exists():
+        try:
+            report = json.loads(_path.read_text())
+            raw = float(report.get("ah_alpha_pooled", AH_ALPHA_PRIOR))
+            return min(raw, AH_ALPHA_CAP)
+        except (KeyError, ValueError, json.JSONDecodeError):
+            pass
+    return float(AH_ALPHA_PRIOR)
+
+
+def _market_score_matrix(
+    ah_line: float,
+    ou_line: float,
+    max_goals: int = 8,
+) -> list[list[float]] | None:
+    """Construct an implied Poisson score matrix from market AH and O/U lines.
+
+    Inverts the fair-line approximation:
+        supremacy  s ≈ −ah_line  (goal-diff where home covers ≈ 50 %)
+        total      μ ≈ ou_line   (total goals where over ≈ 50 %)
+        λ_a = (μ + s) / 2 = (ou_line − ah_line) / 2
+        λ_b = (μ − s) / 2 = (ou_line + ah_line) / 2
+
+    Returns None if the implied λ's are non-positive (degenerate market).
+
+    NOTE: betexplorer always sets the "active" AH tab to -0.5 regardless of the true
+    market main line. When using betexplorer data, prefer
+    _market_score_matrix_from_probs() which uses implied win / over probabilities
+    and is correct regardless of which line is shown as active.
+    """
+    import math as _m
+    if math.isnan(ah_line) or math.isnan(ou_line):
+        return None
+
+    la = (ou_line - ah_line) / 2.0
+    lb = (ou_line + ah_line) / 2.0
+
+    if la <= 0.0 or lb <= 0.0:
+        return None
+
+    def pmf(lam: float, k: int) -> float:
+        return _m.exp(-lam) * lam ** k / _m.factorial(k)
+
+    raw = [[pmf(la, i) * pmf(lb, j) for j in range(max_goals + 1)] for i in range(max_goals + 1)]
+    total = sum(raw[i][j] for i in range(max_goals + 1) for j in range(max_goals + 1))
+    return [[raw[i][j] / total for j in range(max_goals + 1)] for i in range(max_goals + 1)]
+
+
+def _market_score_matrix_from_probs(
+    p_cover: float,
+    p_over: float,
+    ah_line: float = -0.5,
+    ou_threshold: float = 2.5,
+    max_goals: int = 8,
+) -> list[list[float]] | None:
+    """Construct an implied Poisson score matrix from market AH and O/U implied probs.
+
+    More robust than _market_score_matrix() because it uses margin-stripped implied
+    probabilities rather than raw line values, which is required when:
+    - betexplorer always shows -0.5 as the active AH tab (historical data)
+    - the-odds-api gives the actual main AH line (any value, e.g., -1.5, -2.5)
+
+    Parameters
+    ----------
+    p_cover      : margin-stripped P(home covers the given AH line).
+                   For ah_line = -0.5: this equals P(home wins outright).
+                   For ah_line = -1.5: this equals P(home wins by 2+ goals).
+    p_over       : margin-stripped P(total > ou_threshold).
+    ah_line      : the AH line being settled (negative = home favoured). Used to
+                   determine the settlement condition for the cover probability.
+    ou_threshold : the O/U threshold (default 2.5).
+    max_goals    : matrix dimension.
+
+    Two-step bisection solve:
+        1. Find μ = λ_a + λ_b from p_over (Poisson sum constraint).
+        2. Find s = λ_a − λ_b from p_cover at ah_line (via settle_line).
+        3. λ_a = (μ + s) / 2,  λ_b = (μ − s) / 2.
+
+    Returns None if inputs are invalid or the numerical solve fails.
+    """
+    import math as _m
+    from wcpredictor.markets.asian import settle_line as _settle
+
+    if math.isnan(p_cover) or math.isnan(p_over):
+        return None
+    if not (0.0 < p_cover < 1.0) or not (0.0 < p_over < 1.0):
+        return None
+
+    # AH settlement threshold for home: wins when goal_diff > (-ah_line)
+    ah_threshold = -ah_line  # e.g., 0.5 for ah_line=-0.5, 1.5 for ah_line=-1.5
+
+    def pmf(lam: float, k: int) -> float:
+        if lam <= 0:
+            return 1.0 if k == 0 else 0.0
+        return _m.exp(-lam) * lam ** k / _m.factorial(k)
+
+    # Step 1: solve for μ = λ_a + λ_b from p_over
+    threshold_int = int(math.ceil(ou_threshold))  # 3 for ou_threshold=2.5
+
+    def ou_residual(mu: float) -> float:
+        p_under_eq = sum(pmf(mu, k) for k in range(threshold_int))
+        return (1.0 - p_under_eq) - p_over
+
+    lo, hi = 0.01, 20.0
+    try:
+        f_lo, f_hi = ou_residual(lo), ou_residual(hi)
+        if f_lo * f_hi > 0:
+            return None
+        for _ in range(60):
+            mid = (lo + hi) / 2.0
+            if ou_residual(mid) * f_lo <= 0:
+                hi = mid
+            else:
+                lo = mid
+        mu = (lo + hi) / 2.0
+    except Exception:
+        return None
+
+    if mu <= 0.0:
+        return None
+
+    # Step 2: solve for s = λ_a − λ_b from p_cover at ah_line
+    def ah_cover_prob(s: float) -> float:
+        """P(home covers AH line) given la=(μ+s)/2, lb=(μ-s)/2."""
+        la = (mu + s) / 2.0
+        lb = (mu - s) / 2.0
+        if la <= 0.0 or lb <= 0.0:
+            return 0.0
+        # Build integer goal-diff distribution
+        diff_dist: dict[int, float] = {}
+        for ga in range(max_goals + 1):
+            pa = pmf(la, ga)
+            if pa < 1e-12:
+                continue
+            for gb in range(max_goals + 1):
+                pb = pmf(lb, gb)
+                if pb < 1e-12:
+                    continue
+                d = ga - gb
+                diff_dist[d] = diff_dist.get(d, 0.0) + pa * pb
+        try:
+            result = _settle(diff_dist, ah_threshold)
+            return result["p_win"] + result["p_half_win"]
+        except Exception:
+            return 0.0
+
+    def s_residual(s: float) -> float:
+        return ah_cover_prob(s) - p_cover
+
+    s_lo, s_hi = -(mu - 0.01), (mu - 0.01)
+    try:
+        f_slo, f_shi = s_residual(s_lo), s_residual(s_hi)
+        if f_slo * f_shi > 0:
+            return None
+        for _ in range(60):
+            mid = (s_lo + s_hi) / 2.0
+            if s_residual(mid) * f_slo <= 0:
+                s_hi = mid
+            else:
+                s_lo = mid
+        s = (s_lo + s_hi) / 2.0
+    except Exception:
+        return None
+
+    la = (mu + s) / 2.0
+    lb = (mu - s) / 2.0
+    if la <= 0.0 or lb <= 0.0:
+        return None
+
+    raw = [[pmf(la, i) * pmf(lb, j) for j in range(max_goals + 1)] for i in range(max_goals + 1)]
+    total = sum(raw[i][j] for i in range(max_goals + 1) for j in range(max_goals + 1))
+    if total <= 0.0:
+        return None
+    return [[raw[i][j] / total for j in range(max_goals + 1)] for i in range(max_goals + 1)]
+
+
+def _blend_matrix_ah(
+    model_mat: list[list[float]],
+    ah_line: float,
+    ou_line: float,
+    alpha: float,
+    max_goals: int = 8,
+    *,
+    ah_p_home: float | None = None,
+    ou_p_over: float | None = None,
+) -> list[list[float]]:
+    """Blend the model score matrix with a market-implied matrix at weight *alpha*.
+
+    If *ah_p_home* and *ou_p_over* are supplied (margin-stripped implied probabilities),
+    the market matrix is built via _market_score_matrix_from_probs() which correctly
+    handles the betexplorer artifact of always showing -0.5 as the active AH line.
+    Falls back to _market_score_matrix() (line-based inversion) otherwise.
+
+    If market data is unavailable or degenerate, returns the model matrix unchanged.
+    M' = (1 − α) · M_model + α · M_market  (renormalized)
+    """
+    if alpha <= 0.0:
+        return model_mat
+
+    # Prefer prob-based inversion (robust to betexplorer -0.5 default line and
+    # handles any AH line correctly, e.g., -1.5, -2.5 from the-odds-api).
+    if ah_p_home is not None and ou_p_over is not None and \
+            not (math.isnan(ah_p_home) or math.isnan(ou_p_over)):
+        mkt_mat = _market_score_matrix_from_probs(
+            ah_p_home, ou_p_over, ah_line=ah_line, ou_threshold=ou_line, max_goals=max_goals
+        )
+    else:
+        mkt_mat = _market_score_matrix(ah_line, ou_line, max_goals)
+
+    if mkt_mat is None:
+        return model_mat
+
+    n = max_goals + 1
+    blended = [
+        [(1.0 - alpha) * model_mat[i][j] + alpha * mkt_mat[i][j] for j in range(n)]
+        for i in range(n)
+    ]
+    total = sum(blended[i][j] for i in range(n) for j in range(n))
+    if total <= 0.0:
+        return model_mat
+    return [[blended[i][j] / total for j in range(n)] for i in range(n)]
+
+
 def _build_odds_lookup(
     odds_df: "pd.DataFrame",
 ) -> "dict[tuple[str, str], tuple[float, float, float]]":
@@ -277,6 +509,7 @@ def predict_match(
         la_ens, lb_ens = matrix_to_lambdas(mat)
         top_sc = matrix_to_top_scorelines(mat, n=5)
 
+        from wcpredictor.markets.asian import ladder as _ah_ladder
         result = {
             "p_win": round(combined_cal[0], 6),
             "p_draw": round(combined_cal[1], 6),
@@ -285,20 +518,25 @@ def predict_match(
             "lambda_b": round(lb_ens, 4),
             "score_matrix": mat,
             "top_scorelines": top_sc,
+            "markets": _ah_ladder(mat),
         }
 
     elif model == "dixon_coles":
         from wcpredictor.models.dixon_coles import fit as dc_fit
         from wcpredictor.models.dixon_coles import predict_one as dc_predict_one
+        from wcpredictor.markets.asian import ladder as _ah_ladder
 
         dc_params = dc_fit(train, ref_date=cutoff)
         result = dc_predict_one(dc_params, team_a, team_b, neutral=neutral)
+        result["markets"] = _ah_ladder(result["score_matrix"])
         model_version = "dc-0.1"
     else:
+        from wcpredictor.markets.asian import ladder as _ah_ladder
         home_bonus = 0.0 if neutral else 50.0
         elo_diff_adj = (r_a + home_bonus) - r_b
         base, beta = poisson_fit(elo_df)
         result = poisson_predict_one(elo_diff_adj, base, beta)
+        result["markets"] = _ah_ladder(result["score_matrix"])
         model_version = "mvp-0.1"
 
     result.update(
@@ -444,6 +682,44 @@ def _build_frozen_state(
         # Resolve odds_alpha for ensemble_mkt — read from pre-computed report when available
         state["odds_alpha"] = _resolve_odds_alpha()
 
+    # AH matrix-blend: load AH odds lookup and alpha (all models benefit from this)
+    from wcpredictor.features.ah_odds import load_wc_ah_odds as _load_ah
+    ah_df = _load_ah()
+    ah_lookup: dict[tuple[str, str], dict] = {}
+
+    def _sf(v: object) -> float | None:
+        """Safely convert to float; return None for NaN / missing."""
+        try:
+            x = float(v)  # type: ignore[arg-type]
+            return x if not math.isnan(x) else None
+        except (TypeError, ValueError):
+            return None
+
+    if not ah_df.empty:
+        for _, r in ah_df[ah_df["year"] == 2026].iterrows():
+            ta, tb = str(r.team_a), str(r.team_b)
+            # Include implied probs so _blend_matrix_ah uses prob-based inversion,
+            # which is robust to betexplorer always showing -0.5 as the active AH line.
+            ah_ph = _sf(r.get("ah_p_home"))
+            ou_po = _sf(r.get("ou_p_over"))
+            entry: dict = {
+                "ah_line": float(r.ah_line),
+                "ou_line": float(r.ou_line),
+                "ah_p_home": ah_ph,
+                "ou_p_over": ou_po,
+            }
+            away_entry: dict = {
+                "ah_line": -float(r.ah_line),
+                "ou_line": float(r.ou_line),
+                # Away perspective: home cover prob flips to away cover prob
+                "ah_p_home": (1.0 - ah_ph) if ah_ph is not None else None,
+                "ou_p_over": ou_po,
+            }
+            ah_lookup[(ta, tb)] = entry
+            ah_lookup[(tb, ta)] = away_entry
+    state["ah_lookup"] = ah_lookup
+    state["ah_alpha"] = _resolve_ah_alpha()
+
     return state
 
 
@@ -469,13 +745,17 @@ def _predict_one_frozen(
     home_bonus = 0.0 if neutral else 50.0
     elo_diff_adj = (r_a + home_bonus) - r_b
 
+    from wcpredictor.markets.asian import ladder as _ah_ladder
+
     if model_name == "poisson":
         result = poisson_predict_one(elo_diff_adj, state["poisson_base"], state["poisson_beta"])
+        result["markets"] = _ah_ladder(result["score_matrix"])
         model_version = "mvp-0.1"
 
     elif model_name == "dixon_coles":
         from wcpredictor.models.dixon_coles import predict_one as dc_predict_one
         result = dc_predict_one(state["dc_params"], team_a, team_b, neutral=neutral)
+        result["markets"] = _ah_ladder(result["score_matrix"])
         model_version = "dc-0.1"
 
     elif model_name in {"ensemble", "ensemble_mkt"}:
@@ -526,6 +806,21 @@ def _predict_one_frozen(
         w_score = state["ens_weights"][:2].copy()
         w_score = w_score / w_score.sum()
         mat = ens_combine_matrices([[p_poi["score_matrix"]], [p_dc["score_matrix"]]], w_score)[0]
+
+        # AH market matrix blend (auto-degrades when no AH odds or alpha == 0)
+        ah_entry = state.get("ah_lookup", {}).get((team_a, team_b))
+        if ah_entry:
+            from wcpredictor.config import MAX_GOALS
+            mat = _blend_matrix_ah(
+                mat,
+                ah_entry["ah_line"],
+                ah_entry["ou_line"],
+                state.get("ah_alpha", 0.0),
+                MAX_GOALS,
+                ah_p_home=ah_entry.get("ah_p_home"),
+                ou_p_over=ah_entry.get("ou_p_over"),
+            )
+
         la_ens, lb_ens = matrix_to_lambdas(mat)
         top_sc = matrix_to_top_scorelines(mat, n=5)
 
@@ -550,6 +845,7 @@ def _predict_one_frozen(
             "lambda_b": round(lb_ens, 4),
             "score_matrix": mat,
             "top_scorelines": top_sc,
+            "markets": _ah_ladder(mat),
         }
 
     else:

@@ -56,6 +56,26 @@ WC2010_ODDS_URL: str = "https://www.betexplorer.com/football/world/world-cup-201
 # SHA-256 of data/raw/wc2010_odds.csv generated from the Playwright snapshots
 WC2010_ODDS_CSV_SHA256: str = "602bb2c598a91e81359e2728537a300edaa1cc5571c1dec0cc1be4c85c0a52b7"
 
+# WC AH/totals odds from betexplorer.com (one-time Playwright render, user approval required)
+# Source: betexplorer.com per-match AH/O-U pages for WC 2010, 2014, 2018, 2022
+# Snapshots: data/raw/wc_ah_odds_snapshot_{year}_{ah|ou}.html
+# SHA-256 of data/raw/wc_ah_odds.csv — set after parse_wc_ah_odds(force=True)
+WC_AH_ODDS_CSV_SHA256: str = "95df1a65a17c68413b8eaa1cdec92978e32b5f31df25a39289e45701962132f7"
+
 # Form features
 FORM_WINDOW: int = 5                               # rolling window for recent-form features
 REST_DAYS_CAP: int = 30                            # cap on days-since-last-match
+
+# Asian handicap and Asian totals market lines (standard AH notation; negative = home gives)
+ASIAN_HANDICAP_LINES: list[float] = [
+    -2.5, -2.0, -1.75, -1.5, -1.25, -1.0, -0.75, -0.5, -0.25,
+    0.0,
+    0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5,
+]
+ASIAN_TOTAL_LINES: list[float] = [
+    0.5, 1.0, 1.5, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5,
+]
+
+# Asian-handicap odds blend (Phase 9.4; conservative cap mirrors ODDS_ALPHA_CAP)
+AH_ALPHA_CAP: float = 0.3
+AH_ALPHA_PRIOR: float = 0.0

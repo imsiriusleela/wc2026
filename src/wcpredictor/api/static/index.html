@@ -71,6 +71,24 @@
     .error-msg { color: #ff6680; background: #2a1020; border: 1px solid #7a2030; border-radius: 6px; padding: 0.7rem 1rem; font-size: 0.9rem; margin-top: 0.5rem; }
     .loading { color: #7090c0; font-style: italic; font-size: 0.9rem; margin-top: 0.5rem; }
 
+    /* Asian Markets panel */
+    .markets-section { margin-top: 1.4rem; }
+    .markets-label { font-size: 0.8rem; color: #7090c0; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; margin-bottom: 0.8rem; }
+    .markets-headlines { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .mkt-headline { background: #0e1f38; border-radius: 8px; padding: 0.8rem 1.2rem; flex: 1; min-width: 170px; }
+    .mkt-headline h3 { font-size: 0.75rem; color: #7090c0; text-transform: uppercase; margin-bottom: 0.4rem; }
+    .mkt-headline .mkt-line { font-size: 1.3rem; font-weight: 700; color: #f0c040; }
+    .mkt-headline .mkt-sub { font-size: 0.8rem; color: #9ab0cc; margin-top: 0.3rem; }
+    .markets-tables { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+    .markets-tables > div { flex: 1; min-width: 220px; }
+    table.ah-ladder { border-collapse: collapse; font-size: 0.78rem; width: 100%; }
+    table.ah-ladder th { background: #1a3050; color: #7090c0; padding: 0.28rem 0.55rem; text-align: right; white-space: nowrap; }
+    table.ah-ladder th:first-child { text-align: left; }
+    table.ah-ladder td { padding: 0.22rem 0.55rem; text-align: right; border-bottom: 1px solid #1a2e4a; }
+    table.ah-ladder td:first-child { text-align: left; color: #f0c040; font-weight: 600; }
+    table.ah-ladder tr.main-line td { background: #162840; }
+    table.ah-ladder tr.main-line td:first-child { color: #4de0a0; }
+
     /* Fixtures table */
     .filter-row { display: flex; gap: 0.8rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
     .filter-row label { font-size: 0.82rem; color: #9ab0cc; display: flex; align-items: center; gap: 0.4rem; }
@@ -208,6 +226,9 @@
   const pct = v => v == null ? '—' : (v * 100).toFixed(1) + '%';
   const fmt2 = v => v == null ? '—' : v.toFixed(2);
   const elo_fmt = v => v == null ? '—' : Math.round(v);
+  const fmtLine = l => l === 0 ? '0' : (l > 0 ? '+' + l : '' + l);
+  const fmtOdds = s => (!s || s.fair_odds == null || s.fair_odds >= 999) ? '—' : s.fair_odds.toFixed(2);
+  const coverPct = s => !s ? '—' : ((s.p_win + s.p_half_win) * 100).toFixed(1) + '%';
 
   function heatColor(v, maxV) {
     const ratio = Math.min(1, v / (maxV || 1));
@@ -285,6 +306,71 @@
     }
   });
 
+  function buildMarketsPanel(d) {
+    if (!d.markets) return '';
+    const m = d.markets;
+
+    const ahRows = m.ah_ladder.map(r => {
+      const isMain = r.line === m.ah_fair_line;
+      const cpct = ((r.p_win + r.p_half_win) * 100).toFixed(1);
+      const pushStr = r.p_push > 0.001
+        ? `<span style="color:#556080;font-size:0.72rem"> (${(r.p_push*100).toFixed(1)}%↔)</span>`
+        : '';
+      return `<tr${isMain ? ' class="main-line"' : ''}>
+        <td>${fmtLine(r.line)}</td>
+        <td style="text-align:left">${cpct}%${pushStr}</td>
+        <td>${fmtOdds(r)}</td>
+      </tr>`;
+    }).join('');
+
+    const totRows = m.total_ladder.map(r => {
+      const isMain = r.line === m.total_fair_line;
+      const ov = r.over, un = r.under;
+      return `<tr${isMain ? ' class="main-line"' : ''}>
+        <td>${r.line}</td>
+        <td style="text-align:left">${((ov.p_win+ov.p_half_win)*100).toFixed(1)}%</td>
+        <td>${fmtOdds(ov)}</td>
+        <td style="text-align:left">${((un.p_win+un.p_half_win)*100).toFixed(1)}%</td>
+        <td>${fmtOdds(un)}</td>
+      </tr>`;
+    }).join('');
+
+    const mainAH = m.ah_main;
+    const pushNote = mainAH && mainAH.p_push > 0.001
+      ? ` · Push ${(mainAH.p_push*100).toFixed(1)}%` : '';
+
+    return `
+    <div class="markets-section">
+      <div class="markets-label">Asian Markets</div>
+      <div class="markets-headlines">
+        <div class="mkt-headline">
+          <h3>Fair AH Line (home)</h3>
+          <div class="mkt-line">${fmtLine(m.ah_fair_line)}</div>
+          <div class="mkt-sub">Cover ${coverPct(m.ah_main)} · Odds ${fmtOdds(m.ah_main)}${pushNote}</div>
+        </div>
+        <div class="mkt-headline">
+          <h3>Fair O/U Line</h3>
+          <div class="mkt-line">${m.total_fair_line}</div>
+          <div class="mkt-sub">Over ${coverPct(m.total_main_over)} · Odds ${fmtOdds(m.total_main_over)}</div>
+        </div>
+      </div>
+      <div class="markets-tables">
+        <div>
+          <table class="ah-ladder">
+            <thead><tr><th>AH Line</th><th style="text-align:left">Home Cover</th><th>Fair Odds</th></tr></thead>
+            <tbody>${ahRows}</tbody>
+          </table>
+        </div>
+        <div>
+          <table class="ah-ladder">
+            <thead><tr><th>O/U</th><th style="text-align:left">Over%</th><th>O Odds</th><th style="text-align:left">Under%</th><th>U Odds</th></tr></thead>
+            <tbody>${totRows}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+  }
+
   function renderPredict(d) {
     const maxSc = d.top_scorelines.length ? Math.max(...d.top_scorelines.map(s => s.prob)) : 1;
     const scRows = d.top_scorelines.map(s => `
@@ -331,6 +417,7 @@
         </div>
       </div>
       ${buildMatrix(d.score_matrix, d.team_a, d.team_b)}
+      ${buildMarketsPanel(d)}
     `;
   }
 

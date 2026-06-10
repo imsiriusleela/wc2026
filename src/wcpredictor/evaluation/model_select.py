@@ -187,5 +187,82 @@ def run_model_selection(csv_path: Path | None = None) -> dict:
     return out
 
 
+def run_ah_gate(csv_path: Path | None = None) -> dict | None:
+    """Paired-bootstrap promotion gate for the AH matrix-blend (Phase 9.4).
+
+    Reads data/processed/backtest_permatch_ah.csv (written by backtest.py): one row
+    per test match with market AH odds, scoring the ensemble matrix unblended vs
+    blended at the fold's time-aware alpha ("ta") and at the shipped fixed cap ("fix").
+
+    Gate rule (promote the blend only if BOTH hold, on the time-aware primary):
+      1. Not significantly worse on 1X2 log loss: CI_lo(ll_blend − ll_model) ≤ 0.
+      2. Credibly better on AH cover Brier:       CI_hi(cb_blend − cb_model) < 0.
+
+    Returns dict with comparisons and "decision" ∈ {"promote", "demote"},
+    or None if the per-match AH file is absent (no market AH data).
+    """
+    if csv_path is None:
+        csv_path = DATA_PROCESSED / "backtest_permatch_ah.csv"
+    if not csv_path.exists():
+        print(f"\n[AH gate] per-match AH file not found: {csv_path} — skipping.")
+        return None
+
+    df = pd.read_csv(csv_path)
+    out: dict = {"n": len(df)}
+
+    print(f"\n=== AH matrix-blend promotion gate (n={len(df)} matches with AH odds) ===")
+    print(f"{'Comparison':<34} {'Δ mean':>9} {'CI lo':>9} {'CI hi':>9} {'P(blend wins)':>14}")
+    print("─" * 80)
+
+    comparisons = {
+        "ll_ta":  ("1X2 logloss: blend(ta) − model",  df["ll_blend_ta"] - df["ll_model"]),
+        "cb_ta":  ("AH Brier: blend(ta) − model",     df["cb_blend_ta"] - df["cb_model"]),
+        "ll_fix": ("1X2 logloss: blend(0.3) − model", df["ll_blend_fix"] - df["ll_model"]),
+        "cb_fix": ("AH Brier: blend(0.3) − model",    df["cb_blend_fix"] - df["cb_model"]),
+        "cb_mkt": ("AH Brier: market − model",        df["cb_market"] - df["cb_model"]),
+    }
+    for key, (name, diffs) in comparisons.items():
+        arr = diffs.dropna().values
+        mean, lo, hi = _boot_mean_ci(arr)
+        wf = _boot_win_frac(arr)
+        out[key] = {"mean": mean, "ci_lo": lo, "ci_hi": hi, "p_blend_better": wf}
+        print(f"  {name:<32} {mean:>9.4f} [{lo:>7.4f}, {hi:>7.4f}]  {wf:>10.1%}")
+
+    not_worse_1x2 = out["ll_ta"]["ci_lo"] <= _SIG_THRESHOLD
+    better_ah = out["cb_ta"]["ci_hi"] < _SIG_THRESHOLD
+
+    if not_worse_1x2 and better_ah:
+        decision = "promote"
+        rationale = (
+            "Time-aware blend is credibly better on AH cover Brier "
+            f"(CI hi {out['cb_ta']['ci_hi']:.4f} < 0) and not significantly worse on "
+            f"1X2 log loss (CI lo {out['ll_ta']['ci_lo']:.4f} ≤ 0). "
+            "Keep the capped AH matrix-blend (α ≤ AH_ALPHA_CAP)."
+        )
+    else:
+        decision = "demote"
+        reasons = []
+        if not not_worse_1x2:
+            reasons.append(
+                f"blend significantly worse on 1X2 log loss (CI lo {out['ll_ta']['ci_lo']:.4f} > 0)"
+            )
+        if not better_ah:
+            reasons.append(
+                f"AH Brier improvement not credible (CI hi {out['cb_ta']['ci_hi']:.4f} ≥ 0, "
+                f"P(blend wins) {out['cb_ta']['p_blend_better']:.1%})"
+            )
+        rationale = (
+            "; ".join(reasons)
+            + ". Set the serve-time AH alpha to 0 (derive-only AH markets, no matrix blend)."
+        )
+
+    out["decision"] = decision
+    out["rationale"] = rationale
+    print(f"\n=== AH GATE: {decision.upper()} ===")
+    print(f"Rationale: {rationale}\n")
+    return out
+
+
 if __name__ == "__main__":
     run_model_selection()
+    run_ah_gate()

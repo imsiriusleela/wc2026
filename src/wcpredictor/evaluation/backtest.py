@@ -32,6 +32,8 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 
 from wcpredictor.config import (
+    AH_ALPHA_CAP,
+    AH_ALPHA_PRIOR,
     DATA_PROCESSED,
     DC_CAL_VALIDATION_YEARS,
     ENSEMBLE_POOL,
@@ -43,15 +45,26 @@ from wcpredictor.data.download_odds import download_odds
 from wcpredictor.data.download_wc2010_odds import parse_wc2010_odds
 from wcpredictor.data.load_matches import load_matches
 from wcpredictor.features.odds import align_odds_to_test, load_wc_odds, merge_odds_features
+from wcpredictor.features.ah_odds import align_ah_to_test, load_wc_ah_odds
 from wcpredictor.evaluation.metrics import (
+    _settle_outcome as _ah_settle_outcome,
     accuracy,
+    ah_cover_brier,
+    ah_cover_calibration,
+    ah_roi,
     brier,
+    closing_line_value,
     exact_score_logscore,
     goal_mae,
     goal_rmse,
     log_loss,
     macro_f1,
     topn_hit_rate,
+)
+from wcpredictor.markets.asian import (
+    goal_diff_distribution as _goal_diff_dist,
+    ladder as _ah_ladder,
+    settle_line as _settle_line,
 )
 from wcpredictor.features.elo import compute_elo
 from wcpredictor.features.form import compute_form
@@ -122,6 +135,29 @@ def _fit_odds_alpha(
         return log_loss(labels, blended)
 
     res = minimize_scalar(_neg_ll, bounds=(0.0, 1.0), method="bounded")
+    return float(res.x)
+
+
+def _fit_ah_alpha(
+    true_a: list[int],
+    true_b: list[int],
+    model_p_cover: list[float],
+    market_p_cover: list[float],
+    ah_thresholds: list[float],
+) -> float:
+    """Return α ∈ [0,1] minimising AH cover Brier of (1-α)·model + α·market.
+
+    Mirrors _fit_odds_alpha but operates at the P(home covers) level using
+    Brier score as the loss (both model and market output a single probability).
+    """
+    def _brier_blend(alpha: float) -> float:
+        blend = [
+            (1.0 - alpha) * m + alpha * k
+            for m, k in zip(model_p_cover, market_p_cover)
+        ]
+        return ah_cover_brier(true_a, true_b, blend, ah_thresholds)
+
+    res = minimize_scalar(_brier_blend, bounds=(0.0, 1.0), method="bounded")
     return float(res.x)
 
 
@@ -265,13 +301,26 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
     # GBM is the only member that uses these cols; HGB handles NaN natively.
     elo_all = merge_odds_features(elo_all, odds_df)
 
+    # Load AH/O-U market odds (betexplorer WC 2010-2022 CSV; live 2026 from odds-api)
+    ah_df = load_wc_ah_odds()
+
     # Rolling collector for time-aware α fitting (no leakage)
     prev_odds_labels: list[int] = []
     prev_odds_ens_probs: list[list[float]] = []
     prev_odds_market_probs: list[list[float]] = []
 
+    # Rolling collector for time-aware AH α fitting (no leakage)
+    prev_ah_true_a: list[int] = []
+    prev_ah_true_b: list[int] = []
+    prev_ah_model_p: list[float] = []
+    prev_ah_market_p: list[float] = []
+    prev_ah_thresholds: list[float] = []
+
     # Per-match collector for model_select.py bootstrap analysis
     permatch_rows: list[dict] = []
+
+    # Per-match collector for the AH matrix-blend promotion gate (model_select.py)
+    permatch_ah_rows: list[dict] = []
 
     results = {}
     for year in years:
@@ -493,6 +542,163 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
         if ens_probs_market:
             permatch_rows.extend(_per_match_vec(year, "ens_mkt", labels_dc, ens_probs_market, _has_odds))
 
+        # ── AH cover metrics (model-derived; no market odds required) ──────
+        ah_p_cover_ens: list[float] = []
+        ah_thresholds_ens: list[float] = []
+        for _mat in ens_matrices:
+            _lad = _ah_ladder(_mat)
+            ah_thresholds_ens.append(-_lad["ah_fair_line"])
+            _main = _lad["ah_main"]
+            ah_p_cover_ens.append(_main["p_win"] + _main["p_half_win"])
+
+        ah_fold_info: dict = {}
+        if ah_p_cover_ens:
+            ah_fold_info = {
+                "ah_cover_brier": round(
+                    ah_cover_brier(true_a_dc, true_b_dc, ah_p_cover_ens, ah_thresholds_ens), 4
+                ),
+                "ah_cover_ece": round(
+                    ah_cover_calibration(true_a_dc, true_b_dc, ah_p_cover_ens, ah_thresholds_ens), 4
+                ),
+            }
+
+        # ── Market-AH blend evaluation (betexplorer WC odds) ─────────────────
+        # Align market AH/O-U odds to this fold's test matches.
+        # For each match with odds: compute model P(cover) at the *market's* AH line
+        # (not the model's fair line) so the comparison is on a common footing.
+        market_ah_aligned = align_ah_to_test(ah_df, year, test_elo) if not ah_df.empty else None
+        ens_ah_market_info: dict = {}
+
+        if market_ah_aligned is not None:
+            mkt_true_a: list[int] = []
+            mkt_true_b: list[int] = []
+            mkt_model_p_cover: list[float] = []
+            mkt_market_p_cover: list[float] = []
+            mkt_thresholds: list[float] = []
+            mkt_model_ah_lines: list[float] = []
+            mkt_market_ah_lines: list[float] = []
+            mkt_home_odds_raw: list[float] = []
+            mkt_mats: list[list[list[float]]] = []
+            mkt_ou_lines: list[float] = []
+            mkt_ou_p_over: list[float] = []
+            mkt_idx: list[int] = []
+
+            for k, (mat, ga, gb, ae) in enumerate(
+                zip(ens_matrices, true_a_dc, true_b_dc, market_ah_aligned)
+            ):
+                ah_l = ae.get("ah_line")
+                ah_ph = ae.get("ah_p_home")
+                ah_raw_odds = ae.get("ah_p_away")  # margin-stripped; need raw odds separately
+                if ah_l is None or math.isnan(float(ah_l)):
+                    continue
+                if ah_ph is None or math.isnan(float(ah_ph)):
+                    continue
+
+                threshold = -float(ah_l)   # AH -0.5 → threshold 0.5 (home wins by >0.5)
+                diff_dist = _goal_diff_dist(mat)
+                model_settle = _settle_line(diff_dist, threshold)
+                p_model = model_settle["p_win"] + model_settle["p_half_win"]
+
+                mkt_true_a.append(ga)
+                mkt_true_b.append(gb)
+                mkt_model_p_cover.append(p_model)
+                mkt_market_p_cover.append(float(ah_ph))
+                mkt_thresholds.append(threshold)
+                mkt_model_ah_lines.append(_ah_ladder(mat)["ah_fair_line"])
+                mkt_market_ah_lines.append(float(ah_l))
+                # Approximate raw home odds = 1 / ah_p_home (before margin strip)
+                mkt_home_odds_raw.append(1.0 / float(ah_ph) if float(ah_ph) > 1e-6 else 0.0)
+                mkt_mats.append(mat)
+                _ou_l = ae.get("ou_line")
+                _ou_po = ae.get("ou_p_over")
+                mkt_ou_lines.append(float(_ou_l) if _ou_l is not None else float("nan"))
+                mkt_ou_p_over.append(float(_ou_po) if _ou_po is not None else float("nan"))
+                mkt_idx.append(k)
+
+            if mkt_true_a:
+                # Time-aware alpha: use prior for first fold, else fit from prior folds
+                if not prev_ah_true_a:
+                    alpha_ah = AH_ALPHA_PRIOR
+                else:
+                    alpha_ah = _fit_ah_alpha(
+                        prev_ah_true_a, prev_ah_true_b,
+                        prev_ah_model_p, prev_ah_market_p,
+                        prev_ah_thresholds,
+                    )
+                alpha_ah_eff = min(alpha_ah, AH_ALPHA_CAP)
+                blend_p_cover = [
+                    (1.0 - alpha_ah_eff) * m + alpha_ah_eff * k
+                    for m, k in zip(mkt_model_p_cover, mkt_market_p_cover)
+                ]
+
+                ens_ah_market_info = {
+                    "n_matches": len(mkt_true_a),
+                    "ah_cover_brier_model": round(
+                        ah_cover_brier(mkt_true_a, mkt_true_b, mkt_model_p_cover, mkt_thresholds), 4
+                    ),
+                    "ah_cover_brier_market": round(
+                        ah_cover_brier(mkt_true_a, mkt_true_b, mkt_market_p_cover, mkt_thresholds), 4
+                    ),
+                    "ah_cover_brier_blend": round(
+                        ah_cover_brier(mkt_true_a, mkt_true_b, blend_p_cover, mkt_thresholds), 4
+                    ),
+                    "clv": round(closing_line_value(mkt_model_ah_lines, mkt_market_ah_lines), 3),
+                    "ah_roi_model": round(
+                        ah_roi(mkt_true_a, mkt_true_b, mkt_market_ah_lines, mkt_home_odds_raw, mkt_model_p_cover),
+                        4,
+                    ),
+                    "alpha_ah": round(alpha_ah, 4),
+                    "alpha_ah_effective": round(alpha_ah_eff, 4),
+                }
+
+                # ── Per-match matrix-blend rows for the promotion gate ──────
+                # The serve path blends at the *matrix* level (predict._blend_matrix_ah),
+                # which moves 1X2 probabilities too — evaluate exactly that, per match,
+                # at the fold's time-aware alpha and at the shipped fixed cap.
+                from wcpredictor.predict import _blend_matrix_ah
+
+                def _mat_outcome(m: list[list[float]]) -> tuple[float, float, float]:
+                    n = len(m)
+                    pw = sum(m[i][j] for i in range(n) for j in range(n) if i > j)
+                    pdr = sum(m[i][i] for i in range(n))
+                    pl = sum(m[i][j] for i in range(n) for j in range(n) if i < j)
+                    return pw, pdr, pl
+
+                _EPS = 1e-10
+                for k, mat, ga, gb, ah_l, ah_ph, ou_l, ou_po, thr in zip(
+                    mkt_idx, mkt_mats, mkt_true_a, mkt_true_b,
+                    mkt_market_ah_lines, mkt_market_p_cover,
+                    mkt_ou_lines, mkt_ou_p_over, mkt_thresholds,
+                ):
+                    label = 0 if ga > gb else (1 if ga == gb else 2)
+                    y_cover = _ah_settle_outcome(ga - gb, thr)
+                    row: dict = {
+                        "fold": year, "match_idx": k, "label": label,
+                        "alpha_ta": round(alpha_ah_eff, 4), "alpha_fix": AH_ALPHA_CAP,
+                    }
+                    for tag, a in (("ta", alpha_ah_eff), ("fix", AH_ALPHA_CAP)):
+                        bm = _blend_matrix_ah(
+                            mat, ah_l, ou_l, a, ah_p_home=ah_ph, ou_p_over=ou_po
+                        )
+                        probs3 = _mat_outcome(bm)
+                        row[f"ll_blend_{tag}"] = -math.log(max(probs3[label], _EPS))
+                        bs = _settle_line(_goal_diff_dist(bm), thr)
+                        p_cov = bs["p_win"] + bs["p_half_win"]
+                        row[f"cb_blend_{tag}"] = (p_cov - y_cover) ** 2
+                    probs3 = _mat_outcome(mat)
+                    row["ll_model"] = -math.log(max(probs3[label], _EPS))
+                    ms = _settle_line(_goal_diff_dist(mat), thr)
+                    row["cb_model"] = ((ms["p_win"] + ms["p_half_win"]) - y_cover) ** 2
+                    row["cb_market"] = (ah_ph - y_cover) ** 2
+                    permatch_ah_rows.append(row)
+
+                # Update rolling collector for next fold (time-aware, no leakage)
+                prev_ah_true_a.extend(mkt_true_a)
+                prev_ah_true_b.extend(mkt_true_b)
+                prev_ah_model_p.extend(mkt_model_p_cover)
+                prev_ah_market_p.extend(mkt_market_p_cover)
+                prev_ah_thresholds.extend(mkt_thresholds)
+
         # ── Compile fold results ────────────────────────────────────────────
         fold: dict = {
             "n_matches": len(labels),
@@ -529,6 +735,8 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
                 "pool": ENSEMBLE_POOL,
             },
             **({"model_ensemble_market": ens_market_info} if ens_market_info else {}),
+            **({"model_ensemble_ah": ah_fold_info} if ah_fold_info else {}),
+            **({"model_ensemble_ah_market": ens_ah_market_info} if ens_ah_market_info else {}),
             "baseline_most_common": {
                 "log_loss": round(log_loss(labels, mc_probs), 4),
                 "brier": round(brier(labels, mc_probs), 4),
@@ -553,6 +761,18 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
         odds_alpha_pooled = float(ODDS_ALPHA_PRIOR)
     results["odds_alpha_pooled"] = round(odds_alpha_pooled, 4)
     results["odds_alpha_effective"] = round(min(odds_alpha_pooled, ODDS_ALPHA_CAP), 4)
+    # AH blend alpha — fitted from betexplorer historical AH market odds (time-aware).
+    # Defaults to AH_ALPHA_PRIOR (0.0) when no market AH data is available.
+    if prev_ah_true_a:
+        ah_alpha_pooled = float(_fit_ah_alpha(
+            prev_ah_true_a, prev_ah_true_b,
+            prev_ah_model_p, prev_ah_market_p,
+            prev_ah_thresholds,
+        ))
+    else:
+        ah_alpha_pooled = float(AH_ALPHA_PRIOR)
+    results["ah_alpha_pooled"] = round(ah_alpha_pooled, 4)
+    results["ah_alpha_effective"] = round(min(ah_alpha_pooled, AH_ALPHA_CAP), 4)
 
     # Write per-match CSV for bootstrap model selection
     if permatch_rows:
@@ -564,6 +784,18 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
             _w = csv.DictWriter(_f, fieldnames=_pm_fields)
             _w.writeheader()
             _w.writerows(permatch_rows)
+
+    # Per-match CSV for the AH matrix-blend promotion gate
+    if permatch_ah_rows:
+        DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+        pmah_path = DATA_PROCESSED / "backtest_permatch_ah.csv"
+        _pmah_fields = ["fold", "match_idx", "label", "alpha_ta", "alpha_fix",
+                        "ll_model", "ll_blend_ta", "ll_blend_fix",
+                        "cb_model", "cb_market", "cb_blend_ta", "cb_blend_fix"]
+        with open(pmah_path, "w", newline="") as _f:
+            _w = csv.DictWriter(_f, fieldnames=_pmah_fields)
+            _w.writeheader()
+            _w.writerows(permatch_ah_rows)
 
     return results
 

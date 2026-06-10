@@ -187,6 +187,7 @@ def predict(
         elo_b=result["elo_b"],
         score_matrix=matrix or [],
         top_scorelines=result.get("top_scorelines") or [],
+        markets=result.get("markets"),
     )
 
 

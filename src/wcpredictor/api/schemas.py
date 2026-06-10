@@ -19,6 +19,7 @@ class PredictResponse(BaseModel):
     elo_b: float
     score_matrix: list[list[float]]
     top_scorelines: list[dict[str, Any]]
+    markets: dict[str, Any] | None = None
 
 
 class FixtureRow(BaseModel):
@@ -37,6 +38,7 @@ class FixtureRow(BaseModel):
     elo_b: float | None
     score_matrix: list[list[float]] | None
     top_scorelines: list[dict[str, Any]] | None
+    markets: dict[str, Any] | None = None
 
 
 class TeamStanding(BaseModel):
