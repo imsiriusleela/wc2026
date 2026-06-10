@@ -1,7 +1,7 @@
-# HANDOFF — Phase 12: Live Tournament Operations (PLANNED, not started)
+# HANDOFF — Phase 12: Live Tournament Operations (COMPLETE)
 
-> Written 2026-06-10 (planning session). WC2026 kicks off 2026-06-11.
-> Previous HANDOFF (Phase 11) is complete: all phases 1–11 are merged to main.
+> Planned 2026-06-10 (planning session). Implemented 2026-06-10. Branch: feat/phase12-live-ops.
+> WC2026 kicks off 2026-06-11. All phases 1–11 are merged to main.
 
 ## Goal
 
