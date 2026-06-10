@@ -244,12 +244,13 @@ def simulate_tournament(
     n_sims: int = 20_000,
     seed: int = 42,
     fixtures_path: Path | None = None,
+    output_dir: Path | None = None,
 ) -> pd.DataFrame:
     """Run a Monte-Carlo tournament simulation; return per-team probability table.
 
     Writes:
-        data/processed/wc2026_tournament_sim_<as_of>.csv  — full probability table
-        data/processed/wc2026_tournament_sim_<as_of>.json — top-10 champion summary
+        <output_dir>/wc2026_tournament_sim_<as_of>.csv  — full probability table
+        <output_dir>/wc2026_tournament_sim_<as_of>.json — top-10 champion summary
 
     Args:
         as_of:         Cutoff date string (YYYY-MM-DD); historical data up to (not including) this date.
@@ -257,6 +258,7 @@ def simulate_tournament(
         n_sims:        Number of Monte-Carlo simulations.
         seed:          RNG seed for reproducibility.
         fixtures_path: Path to wc2026_fixtures.csv; defaults to DATA_RAW/wc2026_fixtures.csv.
+        output_dir:    Directory to write CSV/JSON outputs; defaults to DATA_PROCESSED.
 
     Returns:
         DataFrame with columns: team, group, p_win_group, p_runner_up,
@@ -389,8 +391,9 @@ def simulate_tournament(
 
     df = pd.DataFrame(rows)
 
-    DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
-    out_csv = DATA_PROCESSED / f"wc2026_tournament_sim_{as_of}.csv"
+    out_dir = output_dir if output_dir is not None else DATA_PROCESSED
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_csv = out_dir / f"wc2026_tournament_sim_{as_of}.csv"
     df.to_csv(out_csv, index=False)
 
     top10 = df.nlargest(10, "p_champion")[["team", "group", "p_champion"]].to_dict("records")
@@ -402,7 +405,7 @@ def simulate_tournament(
         "p_champion_sum": round(float(df["p_champion"].sum()), 6),
         "top10_champion": top10,
     }
-    (DATA_PROCESSED / f"wc2026_tournament_sim_{as_of}.json").write_text(
+    (out_dir / f"wc2026_tournament_sim_{as_of}.json").write_text(
         json.dumps(summary, indent=2)
     )
 

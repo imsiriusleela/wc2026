@@ -1,126 +1,107 @@
-# HANDOFF — Model-first reframe: cap the market overlay at α≤0.3
+# HANDOFF — Phase 9 (Asian handicap & Asian totals) SHIPPED
 
-> Planning session **2026-06-08**. **SHIPPED 2026-06-09** — alpha cap live, all
-> artifacts regenerated, 212 tests passing (4 new). The odds-day runbook at the
-> bottom is the next standing action once the WC2026 fdco sheet is published.
+> Implemented 2026-06-09; promotion gate run and artifacts finalized **2026-06-10**.
+> Full suite **270 passed, 1 skipped**. WC2026 kicks off **2026-06-11**.
+> The fdco odds-day runbook at the bottom is the standing action — the WC2026 sheet
+> has **still not published** as of 2026-06-10 (`load_wc_odds()` has 0 rows for 2026).
 
-## Goal
+## What shipped
 
-Make the predictor **model-first**: keep `ensemble_mkt` as the default model but
-**cap its market-blend weight at α ≤ 0.3**, so the bespoke model leads and the market
-is a low-weight calibration overlay rather than the driver. Stay on the
-football-data.co.uk consensus odds source (no live API, no scraping).
+- **9.1 Derived markets** — `src/wcpredictor/markets/asian.py`: goal-diff / total-goals
+  distributions, `settle_line` (whole/half/quarter lines, half-win/half-loss), fair odds,
+  `ladder()`. Attached as a `"markets"` block to every `predict_match` / fixtures response
+  for all model branches. Config: `ASIAN_HANDICAP_LINES`, `ASIAN_TOTAL_LINES`.
+- **9.2 Market AH/totals data** —
+  - Historical 2010–2022: `data/raw/wc_ah_odds.csv` (betexplorer one-time Playwright render,
+    user-approved; 256 rows = 64/WC; AH line missing for 15), pinned via
+    `WC_AH_ODDS_CSV_SHA256` in `config.py`.
+  - Live 2026: `data/download_odds_api.py` → `data/raw/odds_api_wc2026.json`
+    (the-odds-api.com `spreads,totals`, key in `ODDS_API_KEY`, graceful degrade).
+  - Parser: `features/ah_odds.py` (`load_wc_ah_odds` merges live 2026 rows;
+    `align_ah_to_test`, `merge_ah_features`).
+- **9.3 AH evaluation** — `evaluation/metrics.py`: `ah_cover_brier`, `ah_cover_calibration`,
+  `closing_line_value`, `ah_roi`. Backtest settles AH per fold; report carries
+  `model_ensemble_ah` / `model_ensemble_ah_market` per fold.
+- **9.4 Market-AH matrix blend** — market AH+O/U implied probs → implied Poisson matrix
+  (prob-based bisection inversion, robust to betexplorer's always-active −0.5 tab) →
+  `M' = (1−α)·M_model + α·M_market`. α fitted time-aware in backtest
+  (`ah_alpha_pooled = 0.6252` → capped `ah_alpha_effective = 0.3`), resolved at serve time
+  by `_resolve_ah_alpha()`; auto-degrades to α=0 with no AH odds.
+- **9.5 API + frontend** — optional `markets` on `PredictResponse`/`FixtureRow`; "Asian
+  Markets" panel (fair line/total headlines + AH/totals ladders, main-line highlight).
 
-## Context and constraints
+## Promotion gate (run 2026-06-10) — PROMOTE
 
-- The shipped default `ensemble_mkt` blends bookmaker odds at a fitted
-  **α = 0.6388** (`odds_alpha_pooled` in `data/processed/backtest_report.json`) — the
-  market drives ~64% of every prediction.
-- Backtest shows that 64% weight earns almost nothing. Log loss, model-only
-  (`ensemble_cal`) vs market-blended (`ensemble_mkt`):
+The 9.4 blend was implemented without the required paired-bootstrap gate; the gate was
+added and run this session. `backtest.py` now writes `backtest_permatch_ah.csv` (per-match
+1X2 log loss + AH cover Brier for the ensemble matrix, unblended vs matrix-blended at the
+fold's time-aware α and at fixed 0.3); `model_select.py` gained `run_ah_gate()`.
 
-  | WC | model-only | market-blend | Δ |
-  |----|-----------|--------------|---|
-  | 2010 | 0.9644 | 0.9644 | 0.0000 |
-  | 2014 | 0.9233 | 0.9231 | 0.0002 |
-  | 2018 | 0.9563 | 0.9541 | 0.0022 |
-  | 2022 | 1.0682 | 1.0349 | 0.0333 |
+Result over n=241 matches with market AH odds (paired bootstrap, 10k resamples):
 
-  The entire benefit is WC2022; in 3/4 WCs a 64% market lean changes the answer by ≈0.
-  The standalone model already roughly matches a two-thirds-market blend.
-- **Decisions made this session:**
-  - Objective = **model-first** (over calibration-first / value-finding).
-  - Market role = **capped overlay, α ≤ 0.3** (over pure model-only / disagreement view).
-  - Odds source = **stay on fdco consensus** (rejected: live The-Odds-API, Betfair,
-    single-book scrape). With the market demoted to ≤0.3, fdco's consensus sheet
-    (arrives days pre-kickoff) is sufficient; the "2026 sheet not yet published"
-    issue is no longer a blocker.
-- Constraints: do **not** reopen the `ensemble_mkt`-vs-`ensemble_cal` calibration
-  decision (`memory/project_model_decision.md`) — `ensemble_mkt` stays default; we
-  only retune its weight. Keep models reproducible; no silent scraping. GBM
-  weight-gate dead ends (`memory/project_gbm_gate.md`) stay closed.
+| Comparison (blend − model) | Δ mean | 95% CI | P(blend wins) |
+|---|---|---|---|
+| 1X2 log loss, time-aware α | −0.0107 | [−0.0221, −0.0018] | 99.3% |
+| AH cover Brier, time-aware α | −0.0028 | [−0.0052, −0.0005] | 99.1% |
+| 1X2 log loss, fixed α=0.3 | −0.0136 | [−0.0269, −0.0018] | 98.9% |
+| AH cover Brier, fixed α=0.3 | −0.0037 | [−0.0075, +0.0002] | 96.9% |
 
-## Files inspected
+Both gate legs pass on the time-aware primary (credibly better on AH Brier, and in fact
+significantly *better* — not just not-worse — on 1X2 log loss). **α stays at 0.3.**
+The 1X2 model-select re-run also re-confirmed `ensemble_mkt` as default
+(Δ vs ens_cal = −0.0089, CI hi −0.0016 < 0).
 
-- `src/wcpredictor/predict.py` — `_resolve_odds_alpha()` (L40–54) is the single funnel
-  for both the live path (`predict_match`, L262) and batch path (`_build_frozen_state`,
-  L442). Capping here covers everything.
-- `src/wcpredictor/evaluation/backtest.py` — `_fit_odds_alpha()` (L110), per-year
-  `model_ensemble_market` eval (~L461–477), pooled fit (~L546).
-- `src/wcpredictor/config.py` — `ODDS_ALPHA_PRIOR` (L48), the place for a new cap const.
-- `tests/test_ensemble_mkt_blend.py` — patches `_resolve_odds_alpha` directly (L53),
-  so a serve-time cap will not break it.
-- `data/processed/backtest_report.json` — holds `odds_alpha_pooled = 0.6388`.
+## Artifacts (regenerated 2026-06-10, post-gate)
 
-## Current findings
-
-The cap is a one-line behavioral change at a single consumption point, plus honest
-re-reporting and a snapshot regen. Low risk, high clarity-of-intent.
-
-## Proposed implementation plan
-
-1. **Config** (`config.py`, near L48): add
-   `ODDS_ALPHA_CAP: float = 0.3` with a comment (unconstrained optimum ~0.64 is
-   WC2022-driven; cap keeps the market an overlay).
-2. **Serve-time cap** (`predict.py` `_resolve_odds_alpha`):
-   `return min(float(report.get("odds_alpha_pooled", ODDS_ALPHA_PRIOR)), ODDS_ALPHA_CAP)`.
-3. **Honest reporting** (`backtest.py`): blend `model_ensemble_market` with
-   `alpha_eff = min(alpha_odds, ODDS_ALPHA_CAP)`; store `alpha_odds` (raw) and
-   `alpha_effective` per year; add top-level `odds_alpha_effective`. Keep raw
-   `odds_alpha_pooled` for transparency.
-4. **Frontend** (`api/static/index.html`): one-line note that the market is a capped
-   calibration overlay (α≤0.3) and the headline is model-led. No structural change.
-5. **Tests** (`tests/test_odds_alpha_cap.py` or extend `test_api.py`): pooled 0.64 →
-   resolved 0.3; pooled 0.1 → 0.1; missing report → 0.0. Keep
-   `test_ensemble_mkt_blend.py` green.
-6. **Regenerate artifacts** (after code lands):
-   ```bash
-   uv run python -m wcpredictor.evaluation.backtest
-   uv run python -c "from wcpredictor.predict import predict_fixtures; predict_fixtures('2026-06-11', models=['ensemble','ensemble_mkt'])"
-   uv run python -m wcpredictor.simulate --as-of 2026-06-11 --model ensemble_mkt --n-sims 20000 --seed 42
-   ```
-   then refresh `wc2026_scorecard.json` via its existing generation step.
-
-## Exact next steps
-1. Fresh execution session (out of plan mode).
-2. Edits in order: config → predict → backtest → frontend → tests.
-3. Run the suite, then regenerate artifacts.
-4. Update this HANDOFF to reflect the cap shipped.
+- `data/processed/backtest_report.json` + `backtest_permatch.csv` + `backtest_permatch_ah.csv`
+- `data/processed/wc2026_predictions_2026-06-11.csv` (ensemble + ensemble_mkt, AH blend in)
+- `data/processed/wc2026_tournament_sim_2026-06-11.{csv,json}` (ensemble_mkt, 20k, seed 42)
 
 ## Verification commands
+
 ```bash
-uv run pytest -q                                         # full: was 208 passed, 1 skipped
-uv run python -c "from wcpredictor.predict import _resolve_odds_alpha; print(_resolve_odds_alpha())"   # -> 0.3
+uv run pytest -q                                      # 270 passed, 1 skipped
+uv run python -m wcpredictor.evaluation.model_select  # 1X2 selection + AH gate (PROMOTE)
+uv run python -m wcpredictor.evaluation.backtest      # report + per-match CSVs
+uv run python -c "from wcpredictor.predict import predict_match; import json; \
+  print(json.dumps(predict_match('Brazil','Serbia','2026-06-11')['markets'], indent=2))"
+uv run uvicorn wcpredictor.api.app:app --port 8001    # Asian Markets panel; /fixtures markets
 ```
-- After regenerating the backtest, confirm the `ens_mkt` vs `ens_cal` gap shrinks
-  (WC2022's 0.033 LL edge compresses as α drops 0.64→0.30) — expected/acceptable.
-- Confirm a default `/predict` (`ensemble_mkt`) lands closer to model-only than before.
 
-## Risks and open questions
-- **0.3 is a judgment call**, not a fitted optimum (the LL curve is convex with min
-  ~0.64, so a constrained re-fit to [0,0.3] would just hit the 0.3 boundary —
-  `min(fitted, cap)` is equivalent here).
-- Capping reduces the one tournament (2022) where the market helped; accepted given
-  n=64/WC variance and the model-skill objective.
-- Reproducibility preserved: report keeps both raw (0.64) and effective (0.3) alpha.
+## Notes / residual caveats
 
-## What not to repeat / already settled
-- Do **not** re-implement `/refresh-odds` — shipped (Phase 8.1) and tested.
-- Do **not** reopen `ensemble_mkt` vs `ensemble_cal` (`memory/project_model_decision.md`).
-- Do **not** pursue live-odds APIs / scraping — evaluated and rejected this session;
-  staying on fdco consensus because the market is now a ≤0.3 overlay.
-- GBM weight-gate dead ends: `memory/project_gbm_gate.md`.
+- **90-min settlement convention:** the-odds-api docs do not explicitly state the
+  settlement period for soccer `spreads`/`totals`. Asian handicap and totals are by
+  near-universal bookmaker convention regular-time (90-min) markets, matching the
+  project's label; treat knockout-match AH quotes with that convention in mind. Checked
+  2026-06-10; not doc-verified.
+- The live odds-api snapshot is from **2026-06-09 16:42** — re-pull near kickoff
+  (`uv run python -m wcpredictor.data.download_odds_api`) for fresher closing lines, then
+  `POST /refresh-odds` (or restart the API) so `_STATE_CACHE` rebuilds.
+- `ah_roi_model` is positive in all four backtest folds (0.41/0.14/0.48/0.11 flat-stake vs
+  closing) — interesting but small-n; treat as anecdote, not edge.
+
+## What not to repeat / failed approaches
+
+- Do **not** look for AH columns in `WorldCup_fdco.xlsx` — verified absent (H/D/A only).
+- Do **not** use line-based inversion (`_market_score_matrix`) for betexplorer data — it
+  always shows −0.5 as the active tab; use the prob-based inversion
+  (`_market_score_matrix_from_probs`).
+- The blend promotion is now bootstrap-validated (above) — do not re-litigate without new
+  data; the same evidence bar applies to any future α changes.
+- Do **not** retrain models to get AH/totals — they fall out of the score matrix.
 
 ---
 
-## Related / still valid — fdco odds-day runbook (now lower-stakes)
+## Standing action — fdco odds-day runbook (1X2)
 
-When the `WorldCup2026` sheet appears in `WorldCup_fdco.xlsx` (check ~06-09 onward):
+When the `WorldCup2026` sheet appears in `WorldCup_fdco.xlsx` (still absent 2026-06-10;
+kickoff 06-11 — check daily/hourly):
 1. Pull odds: click **↻ Refresh odds** in the UI, or
    `uv run python -m wcpredictor.data.download_odds`.
 2. Confirm 2026 rows:
    `uv run python -c "from wcpredictor.features.odds import load_wc_odds; df=load_wc_odds(); print((df['year']==2026).sum())"` → > 0.
-3. Re-pin `FDCO_ODDS_SHA256` in `config.py:47`; commit.
-4. Regenerate predictions + 20k sim for `as_of=2026-06-11` (commands above).
-5. Confirm `ensemble` vs `ensemble_mkt` diverge (now a smaller, capped divergence).
+3. Re-pin `FDCO_ODDS_SHA256` in `config.py`; commit.
+4. Regenerate predictions + 20k sim for `as_of=2026-06-11`.
+5. Confirm `ensemble` vs `ensemble_mkt` diverge (small, capped divergence expected).
 6. Restart API / `POST /refresh-odds` so `_STATE_CACHE` rebuilds.

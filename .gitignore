@@ -24,3 +24,6 @@ data/processed/
 
 # Agent memory store (do not commit)
 memory/
+
+# Claude Code local settings
+.claude/settings.local.json

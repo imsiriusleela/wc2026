@@ -369,6 +369,7 @@ class TestStandingsTiebreak:
             n_sims=500,
             seed=0,
             fixtures_path=_FIXTURE_PATH,
+            output_dir=tmp_path,
         )
         # Basic sanity: all p_win_group in [0, 1]
         assert (df["p_win_group"] >= 0).all()
@@ -392,7 +393,7 @@ class TestSimulateTournament:
     def test_p_champion_sums_to_one(self, tmp_path: Path) -> None:
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=300, seed=1,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         s = df["p_champion"].sum()
         assert abs(s - 1.0) < 0.02, f"p_champion sum = {s}"
@@ -400,7 +401,7 @@ class TestSimulateTournament:
     def test_p_final_sums_to_two(self, tmp_path: Path) -> None:
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=300, seed=2,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         s = df["p_final"].sum()
         assert abs(s - 2.0) < 0.04, f"p_final sum = {s}"
@@ -408,7 +409,7 @@ class TestSimulateTournament:
     def test_p_sf_sums_to_four(self, tmp_path: Path) -> None:
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=300, seed=3,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         s = df["p_sf"].sum()
         assert abs(s - 4.0) < 0.1, f"p_sf sum = {s}"
@@ -416,7 +417,7 @@ class TestSimulateTournament:
     def test_p_r32_sums_to_32(self, tmp_path: Path) -> None:
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=300, seed=4,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         s = df["p_r32"].sum()
         assert abs(s - 32.0) < 0.5, f"p_r32 sum = {s}"
@@ -424,7 +425,7 @@ class TestSimulateTournament:
     def test_all_probs_in_unit_interval(self, tmp_path: Path) -> None:
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=300, seed=5,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         prob_cols = ["p_win_group", "p_runner_up", "p_r32", "p_r16", "p_qf", "p_sf", "p_final", "p_champion"]
         for col in prob_cols:
@@ -435,7 +436,7 @@ class TestSimulateTournament:
         """P(advance to R32) ≥ P(advance to R16) for every team."""
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=300, seed=6,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         assert (df["p_r32"] >= df["p_r16"] - 1e-9).all()
         assert (df["p_r16"] >= df["p_qf"] - 1e-9).all()
@@ -446,63 +447,50 @@ class TestSimulateTournament:
     def test_reproducible_with_same_seed(self, tmp_path: Path) -> None:
         df1 = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=100, seed=99,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         df2 = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=100, seed=99,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         pd.testing.assert_frame_equal(df1, df2)
 
     def test_different_seeds_differ(self, tmp_path: Path) -> None:
         df1 = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=100, seed=1,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         df2 = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=100, seed=2,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         assert not df1["p_champion"].equals(df2["p_champion"])
 
     def test_csv_and_json_written(self, tmp_path: Path) -> None:
-        from wcpredictor.config import DATA_PROCESSED
-        import wcpredictor.simulate as sim_mod
+        import json
 
-        orig = sim_mod.DATA_PROCESSED
-        try:
-            sim_mod.DATA_PROCESSED = tmp_path
-            # patch config reference used inside simulate_tournament
-            import wcpredictor.predict as pred_mod
-            orig_pred = pred_mod.DATA_PROCESSED
-            pred_mod.DATA_PROCESSED = tmp_path
+        df = simulate_tournament(
+            as_of="2026-06-10", model="poisson", n_sims=50, seed=0,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
+        )
+        assert (tmp_path / "wc2026_tournament_sim_2026-06-10.csv").exists()
+        assert (tmp_path / "wc2026_tournament_sim_2026-06-10.json").exists()
 
-            df = simulate_tournament(
-                as_of="2026-06-10", model="poisson", n_sims=50, seed=0,
-                fixtures_path=_FIXTURE_PATH,
-            )
-            assert (tmp_path / "wc2026_tournament_sim_2026-06-10.csv").exists()
-            assert (tmp_path / "wc2026_tournament_sim_2026-06-10.json").exists()
-
-            import json
-            summary = json.loads((tmp_path / "wc2026_tournament_sim_2026-06-10.json").read_text())
-            assert "p_champion_sum" in summary
-            assert abs(summary["p_champion_sum"] - 1.0) < 0.05
-        finally:
-            sim_mod.DATA_PROCESSED = orig
-            pred_mod.DATA_PROCESSED = orig_pred
+        summary = json.loads((tmp_path / "wc2026_tournament_sim_2026-06-10.json").read_text())
+        assert "p_champion_sum" in summary
+        assert abs(summary["p_champion_sum"] - 1.0) < 0.05
 
     def test_returns_48_rows(self, tmp_path: Path) -> None:
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=100, seed=0,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         assert len(df) == 48
 
     def test_correct_columns(self, tmp_path: Path) -> None:
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=100, seed=0,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         expected = {"team", "group", "p_win_group", "p_runner_up",
                     "p_r32", "p_r16", "p_qf", "p_sf", "p_final", "p_champion"}
@@ -512,7 +500,7 @@ class TestSimulateTournament:
         """Brazil (high Elo) should advance to R32 more often than Curaçao (low Elo)."""
         df = simulate_tournament(
             as_of="2026-06-10", model="poisson", n_sims=500, seed=0,
-            fixtures_path=_FIXTURE_PATH,
+            fixtures_path=_FIXTURE_PATH, output_dir=tmp_path,
         )
         brazil_r32 = df.loc[df["team"] == "Brazil", "p_r32"].values[0]
         curacao_r32 = df.loc[df["team"] == "Curaçao", "p_r32"].values[0]
