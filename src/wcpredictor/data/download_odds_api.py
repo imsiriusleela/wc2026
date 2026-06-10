@@ -175,6 +175,93 @@ def parse_h2h_1x2(data: list[dict]) -> pd.DataFrame:
     return df.sort_values("date").drop_duplicates(["team_a", "team_b"], keep="last").reset_index(drop=True)
 
 
+def parse_market_offers(data: list[dict]) -> pd.DataFrame:
+    """Parse the-odds-api JSON → individual bookmaker spread and totals offers.
+
+    Returns DataFrame with columns:
+        year, date, team_a, team_b, market, line, side, price, bookmaker
+
+    market='ah'    : Asian handicap; line is always the home AH line in standard notation
+                     (negative = home gives goals).  Both home and away sides are emitted
+                     as separate rows so each is a distinct bettable offer.
+    market='total' : Asian totals over/under; line is the total-goals threshold.
+
+    Validation: prices > 1.0, line on the quarter grid (multiples of 0.25).
+    TBD/placeholder events (knockout-stage "Winner Group X" etc.) are skipped.
+    Exact duplicate rows (same team pair, market, line, side, bookmaker) are dropped.
+    """
+    _COLS = ["year", "date", "team_a", "team_b", "market", "line", "side", "price", "bookmaker"]
+    rows: list[dict] = []
+
+    for event in data:
+        home_raw = event.get("home_team", "")
+        away_raw = event.get("away_team", "")
+        ta = canonical(home_raw)
+        tb = canonical(away_raw)
+        if not ta or not tb or _is_tbd(ta) or _is_tbd(tb):
+            continue
+
+        date = pd.Timestamp(str(event.get("commence_time", ""))[:10])
+
+        for bookie in event.get("bookmakers", []):
+            bk = bookie.get("key", "")
+            for market in bookie.get("markets", []):
+                mkey = market.get("key", "")
+                outcomes = market.get("outcomes", [])
+
+                if mkey == "spreads":
+                    home_oc = next(
+                        (o for o in outcomes if o.get("name") in (home_raw, ta)), None
+                    )
+                    away_oc = next(
+                        (o for o in outcomes if o.get("name") in (away_raw, tb)), None
+                    )
+                    if home_oc is None or away_oc is None:
+                        continue
+                    try:
+                        home_line = float(home_oc.get("point", 0))
+                        home_price = float(home_oc["price"])
+                        away_price = float(away_oc["price"])
+                    except (TypeError, ValueError, KeyError):
+                        continue
+                    if home_price <= 1.0 or away_price <= 1.0:
+                        continue
+                    if abs(round(home_line * 4) - home_line * 4) > 1e-6:
+                        continue
+                    base = {"year": 2026, "date": date, "team_a": ta, "team_b": tb,
+                            "market": "ah", "line": home_line, "bookmaker": bk}
+                    rows.append({**base, "side": "home", "price": home_price})
+                    rows.append({**base, "side": "away", "price": away_price})
+
+                elif mkey == "totals":
+                    over_oc = next((o for o in outcomes if o.get("name") == "Over"), None)
+                    under_oc = next((o for o in outcomes if o.get("name") == "Under"), None)
+                    if over_oc is None or under_oc is None:
+                        continue
+                    try:
+                        tot_line = float(over_oc.get("point", 2.5))
+                        over_price = float(over_oc["price"])
+                        under_price = float(under_oc["price"])
+                    except (TypeError, ValueError, KeyError):
+                        continue
+                    if over_price <= 1.0 or under_price <= 1.0:
+                        continue
+                    if abs(round(tot_line * 4) - tot_line * 4) > 1e-6:
+                        continue
+                    base = {"year": 2026, "date": date, "team_a": ta, "team_b": tb,
+                            "market": "total", "line": tot_line, "bookmaker": bk}
+                    rows.append({**base, "side": "over", "price": over_price})
+                    rows.append({**base, "side": "under", "price": under_price})
+
+    if not rows:
+        return pd.DataFrame(columns=_COLS)
+
+    df = pd.DataFrame(rows)
+    return df.drop_duplicates(
+        ["team_a", "team_b", "market", "line", "side", "bookmaker"], keep="last"
+    ).reset_index(drop=True)
+
+
 def _parse_odds_api_json(data: list[dict]) -> pd.DataFrame:
     """Parse the-odds-api JSON response → tidy DataFrame."""
     rows: list[dict] = []

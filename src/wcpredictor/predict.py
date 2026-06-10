@@ -312,6 +312,52 @@ def _lbl(ga: int, gb: int) -> int:
     return 2
 
 
+def _load_offers_lookup() -> "dict[tuple[str, str], list[dict]]":
+    """Load bookmaker spread/totals offers from the cached odds-API JSON.
+
+    Returns a dict keyed by (team_a, team_b) in both orientations.
+    Empty dict when the JSON is absent, corrupt, or has no offer data.
+    """
+    try:
+        from wcpredictor.data.download_odds_api import parse_market_offers as _parse_offers
+        _live_json = DATA_RAW / "odds_api_wc2026.json"
+        if not _live_json.exists():
+            return {}
+        offers_df = _parse_offers(json.loads(_live_json.read_text()))
+        if offers_df.empty:
+            return {}
+        lookup: dict[tuple[str, str], list[dict]] = {}
+        for (ta, tb), grp in offers_df.groupby(["team_a", "team_b"], sort=False):
+            forward = grp.to_dict("records")
+            reversed_list = []
+            for o in forward:
+                if o["market"] == "ah":
+                    reversed_list.append({
+                        **o, "team_a": tb, "team_b": ta,
+                        "line": -o["line"],
+                        "side": "away" if o["side"] == "home" else "home",
+                    })
+                else:
+                    reversed_list.append({**o, "team_a": tb, "team_b": ta})
+            lookup[(ta, tb)] = forward
+            lookup[(tb, ta)] = reversed_list
+        return lookup
+    except Exception:
+        return {}
+
+
+def _attach_offers(
+    markets_dict: dict,
+    matrix: "list[list[float]]",
+    offers: "list[dict]",
+) -> None:
+    """Attach EV-ranked bookmaker offers to a markets dict in-place."""
+    from wcpredictor.markets.edge import evaluate_offers
+    evaluated = evaluate_offers(matrix, offers)
+    markets_dict["offers"] = evaluated
+    markets_dict["best_offer"] = evaluated[0] if evaluated else None
+
+
 def _ensure_data() -> None:
     from wcpredictor.config import DATA_RAW
 
@@ -544,6 +590,10 @@ def predict_match(
         result["markets"] = _ah_ladder(result["score_matrix"])
         model_version = "mvp-0.1"
 
+    _pm_offers = _load_offers_lookup().get((team_a, team_b))
+    if _pm_offers:
+        _attach_offers(result["markets"], result["score_matrix"], _pm_offers)
+
     result.update(
         {
             "team_a": team_a,
@@ -725,6 +775,8 @@ def _build_frozen_state(
     state["ah_lookup"] = ah_lookup
     state["ah_alpha"] = _resolve_ah_alpha()
 
+    state["offers_lookup"] = _load_offers_lookup()
+
     return state
 
 
@@ -855,6 +907,10 @@ def _predict_one_frozen(
 
     else:
         raise ValueError(f"Unknown model: {model_name!r}")
+
+    _offers = state.get("offers_lookup", {}).get((team_a, team_b))
+    if _offers:
+        _attach_offers(result["markets"], result["score_matrix"], _offers)
 
     result.update({
         "team_a": team_a,

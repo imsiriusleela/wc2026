@@ -15,6 +15,20 @@
               {"name": "Draw", "price": 3.50},
               {"name": "Bosnia & Herzegovina", "price": 4.20}
             ]
+          },
+          {
+            "key": "spreads",
+            "outcomes": [
+              {"name": "USA", "point": -0.75, "price": 1.95},
+              {"name": "Bosnia & Herzegovina", "point": 0.75, "price": 1.90}
+            ]
+          },
+          {
+            "key": "totals",
+            "outcomes": [
+              {"name": "Over", "point": 2.5, "price": 1.85},
+              {"name": "Under", "point": 2.5, "price": 1.95}
+            ]
           }
         ]
       },
@@ -27,6 +41,13 @@
               {"name": "USA", "price": 1.90},
               {"name": "Draw", "price": 3.40},
               {"name": "Bosnia & Herzegovina", "price": 4.00}
+            ]
+          },
+          {
+            "key": "spreads",
+            "outcomes": [
+              {"name": "USA", "point": -1.0, "price": 2.05},
+              {"name": "Bosnia & Herzegovina", "point": 1.0, "price": 1.80}
             ]
           }
         ]
@@ -93,6 +114,13 @@
               {"name": "Winner Group A", "price": 1.90},
               {"name": "Draw", "price": 3.40},
               {"name": "Runner-up Group B", "price": 4.00}
+            ]
+          },
+          {
+            "key": "spreads",
+            "outcomes": [
+              {"name": "Winner Group A", "point": -0.5, "price": 1.90},
+              {"name": "Runner-up Group B", "point": 0.5, "price": 1.90}
             ]
           }
         ]
