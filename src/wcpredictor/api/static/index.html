@@ -485,7 +485,8 @@
       return `<span class="model-badge ${cls}">${m}</span>`;
     };
 
-    const html = rows.map(r => `<tr>
+    const html = rows.map(r => `<tr class="fixture-row" style="cursor:pointer" title="Click to predict ${r.team_a} vs ${r.team_b}"
+        data-team-a="${r.team_a}" data-team-b="${r.team_b}" data-model="${r.model}">
       <td>${r.date}</td>
       <td>${r.team_a}</td>
       <td>${r.team_b}</td>
@@ -513,6 +514,16 @@
       else { _fixturesSortCol = col; _fixturesSortAsc = true; }
       renderFixtures();
     });
+  });
+
+  document.getElementById('fixtures-tbody').addEventListener('click', e => {
+    const row = e.target.closest('tr.fixture-row');
+    if (!row) return;
+    document.getElementById('team-a-sel').value = row.dataset.teamA;
+    document.getElementById('team-b-sel').value = row.dataset.teamB;
+    document.getElementById('model-sel').value = row.dataset.model;
+    document.getElementById('predict-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('predict-btn').click();
   });
 
   // ---- Tournament ----
