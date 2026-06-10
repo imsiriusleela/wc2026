@@ -229,10 +229,11 @@ def test_resimulate_returns_ok(monkeypatch, tmp_path):
         "wcpredictor.simulate.simulate_tournament",
         lambda *a, **kw: fake_df,
     )
-    # Write a stub JSON artifact so resimulate can read it
+    # Write a stub JSON artifact so resimulate can read it (in tmp_path, never
+    # the real data/processed — the suite must not clobber live sim artifacts)
+    monkeypatch.setattr(app_module, "DATA_PROCESSED", tmp_path)
     as_of = app_module._default_as_of()
-    stub_json = app_module.DATA_PROCESSED / f"wc2026_tournament_sim_{as_of}.json"
-    stub_json.parent.mkdir(parents=True, exist_ok=True)
+    stub_json = tmp_path / f"wc2026_tournament_sim_{as_of}.json"
     stub_json.write_text('{"n_group_fixed": 3, "n_ko_fixed": 0}')
 
     resp = client.post("/resimulate?n_sims=100&model=ensemble_mkt")
