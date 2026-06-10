@@ -158,7 +158,8 @@ class TestPredictFixtures:
     def test_all_upcoming_if_far_past_date(self, tmp_path: Path) -> None:
         path = _make_fixtures_csv(tmp_path)
         df = predict_fixtures("2020-01-01", fixtures_path=path, output_path=tmp_path / "out.csv")
-        assert len(df) == 3  # all fixtures included when cutoff is before all dates
+        # 3 fixtures total; Spain vs Argentina has goals filled (already played) → skipped
+        assert len(df) == 2
 
     def test_model_column_present(self, tmp_path: Path) -> None:
         """predict_fixtures always includes a `model` column."""

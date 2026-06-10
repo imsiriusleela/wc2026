@@ -58,6 +58,8 @@ class TournamentResponse(BaseModel):
     as_of: str
     model: str
     n_sims: int
+    n_group_fixed: int = 0
+    n_ko_fixed: int = 0
     standings: list[TeamStanding]
     top10_champion: list[dict[str, Any]]
 
@@ -85,4 +87,25 @@ class RefreshOddsResponse(BaseModel):
     pinned_sha256: str
     sha_changed: bool
     state_cache_cleared: bool
+    note: str
+
+
+class RefreshResultsResponse(BaseModel):
+    status: str
+    n_results_total: int
+    n_new: int
+    n_group: int
+    n_knockout: int
+    n_fixtures_updated: int
+    note: str
+
+
+class ResimulateResponse(BaseModel):
+    status: str
+    as_of: str
+    model: str
+    n_sims: int
+    n_group_fixed: int
+    n_ko_fixed: int
+    output_csv: str
     note: str

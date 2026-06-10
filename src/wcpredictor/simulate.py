@@ -17,7 +17,9 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
-from wcpredictor.config import DATA_PROCESSED, DATA_RAW
+import warnings
+
+from wcpredictor.config import DATA_PROCESSED, DATA_RAW, KO_START
 from wcpredictor.data.normalize_teams import canonical
 from wcpredictor.predict import _build_frozen_state, _predict_one_frozen
 
@@ -235,6 +237,64 @@ def _assign_thirds(
 
 
 # ---------------------------------------------------------------------------
+# Conditioning helpers
+# ---------------------------------------------------------------------------
+
+def _load_conditioning(
+    as_of: str,
+    played_results: object = None,
+) -> tuple[dict, dict]:
+    """Load played results for conditioning; return (fixed_scores, ko_winners).
+
+    fixed_scores:  {frozenset({ta, tb}): (team_a, goals_a, goals_b)}  — group matches
+    ko_winners:    {frozenset({ta, tb}): winner_name}                  — KO matches
+
+    Only rows with date < as_of are included (strict leakage guard).
+    """
+    from wcpredictor.data.results_2026 import load_wc2026_results
+
+    as_of_ts = pd.Timestamp(as_of)
+    ko_start = pd.Timestamp(KO_START)
+
+    results = played_results if played_results is not None else load_wc2026_results()  # type: ignore[assignment]
+    if not isinstance(results, pd.DataFrame) or results.empty:  # type: ignore[union-attr]
+        return {}, {}
+
+    # Strict leakage guard
+    results = results[results["date"] < as_of_ts].copy()
+
+    fixed_scores: dict = {}
+    ko_winners: dict = {}
+
+    for _, r in results.iterrows():
+        ta, tb = str(r.team_a), str(r.team_b)
+        key = frozenset([ta, tb])
+        ga, gb = int(r.goals_a), int(r.goals_b)
+
+        if pd.Timestamp(r.date) < ko_start:
+            # Group stage: store score
+            fixed_scores[key] = (ta, ga, gb)
+        else:
+            # KO stage: determine winner
+            if ga > gb:
+                ko_winners[key] = ta
+            elif gb > ga:
+                ko_winners[key] = tb
+            else:
+                # Draw: check explicit winner column (penalty-decided)
+                w = r.get("winner") if hasattr(r, "get") else getattr(r, "winner", None)
+                if w and str(w) not in ("nan", "None", ""):
+                    ko_winners[key] = canonical(str(w))
+                else:
+                    warnings.warn(
+                        f"KO match {ta} vs {tb} on {r.date} is a draw with no winner set — "
+                        "will fall back to model sampling for this match."
+                    )
+
+    return fixed_scores, ko_winners
+
+
+# ---------------------------------------------------------------------------
 # Main simulator
 # ---------------------------------------------------------------------------
 
@@ -245,6 +305,8 @@ def simulate_tournament(
     seed: int = 42,
     fixtures_path: Path | None = None,
     output_dir: Path | None = None,
+    condition_on_results: bool = True,
+    played_results: object = None,
 ) -> pd.DataFrame:
     """Run a Monte-Carlo tournament simulation; return per-team probability table.
 
@@ -253,26 +315,46 @@ def simulate_tournament(
         <output_dir>/wc2026_tournament_sim_<as_of>.json — top-10 champion summary
 
     Args:
-        as_of:         Cutoff date string (YYYY-MM-DD); historical data up to (not including) this date.
-        model:         Model name: "poisson", "dixon_coles", "ensemble", or "ensemble_mkt".
-        n_sims:        Number of Monte-Carlo simulations.
-        seed:          RNG seed for reproducibility.
-        fixtures_path: Path to wc2026_fixtures.csv; defaults to DATA_RAW/wc2026_fixtures.csv.
-        output_dir:    Directory to write CSV/JSON outputs; defaults to DATA_PROCESSED.
+        as_of:                Cutoff date string (YYYY-MM-DD).
+        model:                Model name.
+        n_sims:               Monte-Carlo iterations.
+        seed:                 RNG seed.
+        fixtures_path:        Path to wc2026_fixtures.csv; defaults to DATA_RAW/wc2026_fixtures.csv.
+        output_dir:           Output directory; defaults to DATA_PROCESSED.
+        condition_on_results: If True, played group scores are held fixed and known KO
+                              winners always advance (default: True).
+        played_results:       Injectable DataFrame for tests; None uses the live store.
 
     Returns:
         DataFrame with columns: team, group, p_win_group, p_runner_up,
         p_r32, p_r16, p_qf, p_sf, p_final, p_champion.
+
+    Known limitation: standings use pts/gd/gf + random tiebreak, not FIFA head-to-head.
+    Rare standings mismatches possible; KO-winner conditioning corrects once pairings are real.
     """
     if fixtures_path is None:
         fixtures_path = DATA_RAW / "wc2026_fixtures.csv"
 
     fixtures = pd.read_csv(fixtures_path, parse_dates=["date"])
-    groups = infer_groups(fixtures)
+
+    # Slice to group-stage rows only to avoid the KO-rows-break-infer_groups bug
+    ko_start_ts = pd.Timestamp(KO_START)
+    fixtures_gs = fixtures[fixtures["date"] < ko_start_ts].copy()
+
+    groups = infer_groups(fixtures_gs)
     all_teams = [t for teams in groups.values() for t in teams]
     group_labels = list(groups.keys())
 
     state = _build_frozen_state(as_of, [model])
+
+    # Load conditioning data (played results); empty dicts when none available
+    fixed_scores: dict = {}
+    ko_winners_fixed: dict = {}
+    if condition_on_results:
+        fixed_scores, ko_winners_fixed = _load_conditioning(as_of, played_results)
+
+    n_group_fixed = len(fixed_scores)
+    n_ko_fixed = len(ko_winners_fixed)
 
     # Lazy pairwise prediction cache: (team_a, team_b) → (p_win, p_draw, p_loss, score_matrix)
     cache: dict[tuple[str, str], tuple[float, float, float, np.ndarray]] = {}
@@ -288,11 +370,12 @@ def simulate_tournament(
             )
         return cache[(ta, tb)]
 
-    # Pre-warm cache for all fixed group-stage pairs
-    for _, row in fixtures.iterrows():
+    # Pre-warm cache for all group-stage pairs not covered by fixed scores
+    for _, row in fixtures_gs.iterrows():
         ta = canonical(str(row["team_a"]))
         tb = canonical(str(row["team_b"]))
-        _get(ta, tb)
+        if frozenset([ta, tb]) not in fixed_scores:
+            _get(ta, tb)
 
     # Accumulators
     _ROUNDS = ("r32", "r16", "qf", "sf", "final", "champion")
@@ -314,8 +397,15 @@ def simulate_tournament(
             for i in range(4):
                 for j in range(i + 1, 4):
                     ta, tb = teams[i], teams[j]
-                    _, _, _, smat = _get(ta, tb)
-                    ga, gb = sample_scoreline(smat, rng)
+                    pair_key = frozenset([ta, tb])
+                    if pair_key in fixed_scores:
+                        # Use the played score; held constant across all sims
+                        stored_ta, ga, gb = fixed_scores[pair_key]
+                        if stored_ta != ta:
+                            ga, gb = gb, ga  # flip to match current iteration order
+                    else:
+                        _, _, _, smat = _get(ta, tb)
+                        ga, gb = sample_scoreline(smat, rng)
                     gf[ta] += ga
                     gf[tb] += gb
                     gd[ta] += ga - gb
@@ -350,11 +440,17 @@ def simulate_tournament(
         # --- Knockout ---
         winner: dict[int, str] = {}
 
+        def _ko_with_conditioning(ta: str, tb: str) -> str:
+            pair_key = frozenset([ta, tb])
+            if pair_key in ko_winners_fixed:
+                return ko_winners_fixed[pair_key]
+            return _ko_match(ta, tb, _get, rng)
+
         # R32
         for m_id, (spec_a, spec_b) in _R32_SLOTS.items():
             ta = pos[spec_a]
             tb = third_slot[m_id] if spec_b.startswith("3[") else pos[spec_b]
-            w = _ko_match(ta, tb, _get, rng)
+            w = _ko_with_conditioning(ta, tb)
             winner[m_id] = w
             reach[ta]["r32"] += 1
             reach[tb]["r32"] += 1
@@ -366,14 +462,14 @@ def simulate_tournament(
         ):
             for m_id, (ma, mb) in slots_map.items():
                 ta, tb = winner[ma], winner[mb]
-                w = _ko_match(ta, tb, _get, rng)
+                w = _ko_with_conditioning(ta, tb)
                 winner[m_id] = w
                 reach[ta][round_key] += 1
                 reach[tb][round_key] += 1
 
         # Final
         ta, tb = winner[_FINAL_SLOT[0]], winner[_FINAL_SLOT[1]]
-        champ = _ko_match(ta, tb, _get, rng)
+        champ = _ko_with_conditioning(ta, tb)
         reach[ta]["final"] += 1
         reach[tb]["final"] += 1
         reach[champ]["champion"] += 1
@@ -403,6 +499,8 @@ def simulate_tournament(
         "n_sims": n_sims,
         "seed": seed,
         "p_champion_sum": round(float(df["p_champion"].sum()), 6),
+        "n_group_fixed": n_group_fixed,
+        "n_ko_fixed": n_ko_fixed,
         "top10_champion": top10,
     }
     (out_dir / f"wc2026_tournament_sim_{as_of}.json").write_text(
@@ -418,24 +516,29 @@ def simulate_tournament(
 
 def _main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="WC2026 Monte-Carlo tournament simulator")
-    parser.add_argument("--as-of", required=True, metavar="DATE", help="Cutoff date YYYY-MM-DD")
+    parser.add_argument("--as-of", required=True, metavar="DATE",
+                        help="Cutoff date YYYY-MM-DD; conditions on everything played before this date")
     parser.add_argument(
         "--model", default="ensemble_mkt",
         choices=["poisson", "dixon_coles", "ensemble", "ensemble_mkt"],
     )
     parser.add_argument("--n-sims", type=int, default=20_000, metavar="N")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-condition", action="store_true",
+                        help="Disable conditioning on played results (pure Monte-Carlo)")
     args = parser.parse_args(argv)
 
     print(
         f"Simulating WC2026: as_of={args.as_of}, model={args.model}, "
-        f"n_sims={args.n_sims:,}, seed={args.seed}"
+        f"n_sims={args.n_sims:,}, seed={args.seed}, "
+        f"condition={not args.no_condition}"
     )
     df = simulate_tournament(
         as_of=args.as_of,
         model=args.model,
         n_sims=args.n_sims,
         seed=args.seed,
+        condition_on_results=not args.no_condition,
     )
     cols = ["team", "group", "p_win_group", "p_r32", "p_champion"]
     print("\nTop 10 by P(champion):")

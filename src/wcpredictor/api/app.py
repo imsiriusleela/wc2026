@@ -27,16 +27,24 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from wcpredictor.config import DATA_PROCESSED, DATA_RAW, FDCO_ODDS_SHA256
+from wcpredictor.config import DATA_PROCESSED, DATA_RAW, FDCO_ODDS_SHA256, TOURNAMENT_START
 from wcpredictor.data.download_odds import download_odds
 from wcpredictor.data.normalize_teams import canonical
 from wcpredictor.features.odds import load_wc_odds
 from wcpredictor.predict import _build_frozen_state, _predict_one_frozen
 
-from .schemas import FixtureRow, PredictResponse, RefreshOddsResponse, ScorecardResponse, TeamStanding, TournamentResponse
+from .schemas import (
+    FixtureRow, PredictResponse, RefreshOddsResponse, RefreshResultsResponse,
+    ResimulateResponse, ScorecardResponse, TeamStanding, TournamentResponse,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
-DEFAULT_AS_OF = "2026-06-11"
+
+
+def _default_as_of() -> str:
+    """Return today's date, but never earlier than TOURNAMENT_START."""
+    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    return max(TOURNAMENT_START, today)
 
 # Module-level cache: (as_of, frozenset(models)) -> frozen state dict
 _STATE_CACHE: dict[tuple[str, frozenset], dict] = {}
@@ -106,7 +114,7 @@ def _parse_scorelines(raw: Any) -> list[dict[str, Any]] | None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     try:
-        _get_state(DEFAULT_AS_OF, ["poisson", "dixon_coles", "ensemble"])
+        _get_state(_default_as_of(), ["poisson", "dixon_coles", "ensemble"])
     except Exception:
         pass
     yield
@@ -133,8 +141,10 @@ def predict(
         "ensemble_mkt", description="Model to use"
     ),
     neutral: bool = Query(True, description="Neutral venue"),
-    as_of: str = Query(DEFAULT_AS_OF, description="Data cutoff date (ISO)"),
+    as_of: str = Query(None, description="Data cutoff date (ISO); defaults to today or TOURNAMENT_START"),
 ) -> PredictResponse:
+    if as_of is None:
+        as_of = _default_as_of()
     team_a_c = canonical(team_a)
     team_b_c = canonical(team_b)
 
@@ -269,9 +279,11 @@ def tournament() -> TournamentResponse:
         )
 
     return TournamentResponse(
-        as_of=str(meta.get("as_of", DEFAULT_AS_OF)),
+        as_of=str(meta.get("as_of", TOURNAMENT_START)),
         model=str(meta.get("model", "poisson")),
         n_sims=int(meta.get("n_sims", 500)),
+        n_group_fixed=int(meta.get("n_group_fixed", 0)),
+        n_ko_fixed=int(meta.get("n_ko_fixed", 0)),
         standings=standings,
         top10_champion=top10,
     )
@@ -387,6 +399,116 @@ def refresh_odds() -> RefreshOddsResponse:
             sha_changed=sha_changed,
             state_cache_cleared=True,
             note=" ".join(note_parts),
+        )
+    finally:
+        _REFRESH_LOCK.release()
+
+
+@app.post("/refresh-results", response_model=RefreshResultsResponse)
+def refresh_results() -> RefreshResultsResponse:
+    """Pull latest martj42 results, update the WC2026 results store, and mark played fixtures.
+
+    Writes to data/raw/results_master.csv and data/raw/wc2026_results.csv (never touches pinned results.csv).
+    Clears _STATE_CACHE so the next /predict uses rolled-forward Elo ratings.
+    Non-fatal on network error.
+    """
+    acquired = _REFRESH_LOCK.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(status_code=409, detail="Refresh already in progress.")
+    try:
+        from wcpredictor.data.results_2026 import update_wc2026_results, mark_fixtures_played
+        from wcpredictor.evaluation.live import run_refresh
+
+        errors: list[str] = []
+        stats: dict = {"n_total": 0, "n_new": 0, "n_group": 0, "n_knockout": 0}
+        n_fixtures_updated = 0
+
+        try:
+            stats = update_wc2026_results()
+        except Exception as exc:
+            errors.append(f"results: {exc}")
+
+        try:
+            n_fixtures_updated = mark_fixtures_played()
+        except Exception as exc:
+            errors.append(f"fixtures: {exc}")
+
+        _STATE_CACHE.clear()
+
+        try:
+            run_refresh(as_of_date=_default_as_of())
+        except Exception as exc:
+            errors.append(f"scorecard: {exc}")
+
+        note_parts = [
+            f"{stats['n_total']} results in store ({stats['n_new']} new, "
+            f"{stats['n_group']} group, {stats['n_knockout']} knockout).",
+            f"{n_fixtures_updated} fixture(s) marked as played.",
+            "Prediction cache cleared — next /predict uses updated ratings.",
+        ]
+        if errors:
+            note_parts.append("Errors: " + "; ".join(errors))
+
+        return RefreshResultsResponse(
+            status="ok",
+            n_results_total=stats["n_total"],
+            n_new=stats["n_new"],
+            n_group=stats["n_group"],
+            n_knockout=stats["n_knockout"],
+            n_fixtures_updated=n_fixtures_updated,
+            note=" ".join(note_parts),
+        )
+    finally:
+        _REFRESH_LOCK.release()
+
+
+@app.post("/resimulate", response_model=ResimulateResponse)
+def resimulate(
+    n_sims: int = Query(5000, description="Number of Monte-Carlo simulations"),
+    model: str = Query("ensemble_mkt", description="Model to use for simulation"),
+) -> ResimulateResponse:
+    """Rerun tournament simulation conditioned on played results.
+
+    Synchronous; typically takes 1-2 minutes.  Writes dated artifacts to
+    data/processed/; /tournament picks them up via _latest_artifact.
+    """
+    acquired = _REFRESH_LOCK.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(status_code=409, detail="Refresh already in progress.")
+    try:
+        from wcpredictor.simulate import simulate_tournament
+
+        as_of = _default_as_of()
+        try:
+            df = simulate_tournament(
+                as_of=as_of,
+                model=model,
+                n_sims=n_sims,
+                condition_on_results=True,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Simulation failed: {exc}")
+
+        # Read meta from the JSON artifact just written
+        sim_json = DATA_PROCESSED / f"wc2026_tournament_sim_{as_of}.json"
+        meta: dict = {}
+        if sim_json.exists():
+            try:
+                meta = json.loads(sim_json.read_text())
+            except Exception:
+                pass
+
+        out_csv = str(DATA_PROCESSED / f"wc2026_tournament_sim_{as_of}.csv")
+        return ResimulateResponse(
+            status="ok",
+            as_of=as_of,
+            model=model,
+            n_sims=n_sims,
+            n_group_fixed=int(meta.get("n_group_fixed", 0)),
+            n_ko_fixed=int(meta.get("n_ko_fixed", 0)),
+            output_csv=out_csv,
+            note=f"Simulation complete. Conditioned on {meta.get('n_group_fixed', 0)} group + "
+                 f"{meta.get('n_ko_fixed', 0)} KO results.",
         )
     finally:
         _REFRESH_LOCK.release()
