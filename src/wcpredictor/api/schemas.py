@@ -109,3 +109,83 @@ class ResimulateResponse(BaseModel):
     n_ko_fixed: int
     output_csv: str
     note: str
+
+
+class ValueBet(BaseModel):
+    date: str
+    team_a: str
+    team_b: str
+    market: str
+    line: float
+    side: str
+    sgpools_price: float
+    fair_model: float | None
+    ev_model: float
+    fair_consensus: float | None
+    ev_consensus: float | None
+    recommended: bool
+    recommended_stake: float
+    sizing_tier: str
+    confidence_flags: list[str]
+
+
+class ValueBetsResponse(BaseModel):
+    as_of: str
+    n_offers: int
+    n_recommended: int
+    sizing_tier: str
+    consensus_age_note: str
+    offers_age_note: str
+    bets: list[ValueBet]
+
+
+class RecordBetRequest(BaseModel):
+    team_a: str
+    team_b: str
+    date: str
+    market: str
+    line: float = 0.0
+    side: str
+    price_taken: float
+    stake: float
+    consensus_fair_at_placement: float | None = None
+
+
+class RecordBetResponse(BaseModel):
+    status: str
+    match: str
+    market: str
+    side: str
+    price_taken: float
+    stake: float
+
+
+class LedgerResponse(BaseModel):
+    total_bets: int
+    settled_bets: int
+    open_bets: int
+    total_staked: float
+    total_pnl: float
+    roi: float | None
+    trailing_clv_mean: float | None
+    drawdown_units: float
+    stop_clv: bool
+    stop_drawdown: bool
+    stop_rule_triggered: bool
+    bets: list[dict[str, Any]]
+
+
+class SgpoolsAddRequest(BaseModel):
+    team_a: str
+    team_b: str
+    date: str
+    market: str
+    line: float = 0.0
+    side: str
+    price: float
+
+
+class RefreshSgpoolsResponse(BaseModel):
+    status: str
+    n_fetched: int
+    note: str

@@ -338,6 +338,13 @@ def _load_offers_lookup() -> "dict[tuple[str, str], list[dict]]":
                         "line": -o["line"],
                         "side": "away" if o["side"] == "home" else "home",
                     })
+                elif o["market"] == "1x2":
+                    # 1x2: swap home↔away; draw unchanged
+                    side_map = {"home": "away", "away": "home", "draw": "draw"}
+                    reversed_list.append({
+                        **o, "team_a": tb, "team_b": ta,
+                        "side": side_map.get(o["side"], o["side"]),
+                    })
                 else:
                     reversed_list.append({**o, "team_a": tb, "team_b": ta})
             lookup[(ta, tb)] = forward

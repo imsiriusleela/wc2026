@@ -153,18 +153,25 @@ def ah_cover_calibration(
     return ece
 
 
+def fair_line_gap(
+    model_ah_lines: list[float],
+    market_ah_lines: list[float],
+) -> float:
+    """Mean signed gap between the model's fair AH line and the market's AH line.
+
+    Positive → model is systematically more bullish on the home team than the market.
+    NOT the same as closing-line value (CLV); reflects a systematic bias rather than edge.
+    """
+    diffs = [m - c for m, c in zip(model_ah_lines, market_ah_lines)]
+    return float(np.mean(diffs))
+
+
 def closing_line_value(
     model_ah_lines: list[float],
     market_ah_lines: list[float],
 ) -> float:
-    """Mean closing-line value (CLV) for the model's AH fair line.
-
-    CLV = average signed difference between the model's fair main AH line and
-    the market closing line (both in standard AH notation for the home team).
-    Positive CLV means the model is systematically sharper than market consensus.
-    """
-    diffs = [m - c for m, c in zip(model_ah_lines, market_ah_lines)]
-    return float(np.mean(diffs))
+    """Deprecated alias for fair_line_gap. Use fair_line_gap instead."""
+    return fair_line_gap(model_ah_lines, market_ah_lines)
 
 
 def ah_roi(
