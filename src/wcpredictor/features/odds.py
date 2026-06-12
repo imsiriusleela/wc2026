@@ -230,6 +230,75 @@ def merge_odds_features(
     return out
 
 
+def load_wc_raw_odds(xlsx_path: Path | None = None) -> pd.DataFrame:
+    """Return DataFrame with raw (margin-inclusive) average decimal odds for each match.
+
+    Columns: year, date, team_a, team_b, h_avg, d_avg, a_avg
+
+    Sources: wc2010_odds.csv (odds_h/d/a), fdco WorldCup xlsx (H-Avg/D-Avg/A-Avg).
+    Used by ev_backtest to compute EV against historical prices without re-inflating margin.
+    """
+    if xlsx_path is None:
+        xlsx_path = DATA_RAW / "WorldCup_fdco.xlsx"
+
+    wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+    records: list[dict] = []
+
+    for sheet_name, year in _SHEET_YEARS.items():
+        if sheet_name not in wb.sheetnames:
+            continue
+        ws = wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+        headers = [str(h) if h is not None else "" for h in rows[0]]
+        try:
+            h_col = headers.index("H-Avg")
+            d_col = headers.index("D-Avg")
+            a_col = headers.index("A-Avg")
+            home_col = headers.index("Home")
+            away_col = headers.index("Away")
+            date_col = headers.index("Date")
+        except ValueError:
+            continue
+        for row in rows[1:]:
+            try:
+                h_odds = float(row[h_col])
+                d_odds = float(row[d_col])
+                a_odds = float(row[a_col])
+            except (TypeError, ValueError):
+                continue
+            if h_odds <= 1.0 or d_odds <= 1.0 or a_odds <= 1.0:
+                continue
+            raw_date = row[date_col]
+            if raw_date is None:
+                continue
+            ta = canonical(str(row[home_col]))
+            tb = canonical(str(row[away_col]))
+            if not ta or not tb:
+                continue
+            records.append(dict(
+                year=year, date=pd.Timestamp(raw_date),
+                team_a=ta, team_b=tb,
+                h_avg=h_odds, d_avg=d_odds, a_avg=a_odds,
+            ))
+
+    wb.close()
+    df_xlsx = pd.DataFrame(records)
+
+    wc2010_csv = DATA_RAW / "wc2010_odds.csv"
+    if wc2010_csv.exists():
+        df2010 = pd.read_csv(wc2010_csv, parse_dates=["date"])
+        df2010["team_a"] = df2010["home"].apply(canonical)
+        df2010["team_b"] = df2010["away"].apply(canonical)
+        df2010 = df2010.rename(columns={"odds_h": "h_avg", "odds_d": "d_avg", "odds_a": "a_avg"})
+        df2010["year"] = 2010
+        df2010 = df2010[["year", "date", "team_a", "team_b", "h_avg", "d_avg", "a_avg"]]
+        df_xlsx = pd.concat([df2010, df_xlsx], ignore_index=True)
+
+    return df_xlsx
+
+
 def align_odds_to_test(
     odds_df: pd.DataFrame,
     year: int,

@@ -83,3 +83,14 @@ ASIAN_TOTAL_LINES: list[float] = [
 # Asian-handicap odds blend (Phase 9.4; conservative cap mirrors ODDS_ALPHA_CAP)
 AH_ALPHA_CAP: float = 0.3
 AH_ALPHA_PRIOR: float = 0.0
+
+# ── Betting / money management (Phase 13) ─────────────────────────────────────
+BANKROLL: float = 5000.0            # total bankroll in SGD
+KELLY_FRACTION: float = 0.25        # quarter-Kelly
+MAX_STAKE_PCT: float = 0.02         # per-bet cap (→ $100 at $5k bankroll)
+MAX_DAILY_EXPOSURE_PCT: float = 0.06  # daily staked cap (→ $300 at $5k bankroll)
+MIN_TIER_STAKE: float = 10.0        # minimum stake for no-edge experiment tier
+EV_THRESHOLD: float = 0.0           # default EV threshold for value scan
+STOP_TRAILING_BETS: int = 30        # trailing-window for CLV stop-rule
+STOP_CLV_FLOOR: float = 0.0         # pause if trailing-N mean CLV < this
+STOP_DRAWDOWN_UNITS: float = 15.0   # pause if drawdown exceeds this many units

@@ -44,8 +44,8 @@ from wcpredictor.data.download import download_results
 from wcpredictor.data.download_odds import download_odds
 from wcpredictor.data.download_wc2010_odds import parse_wc2010_odds
 from wcpredictor.data.load_matches import load_matches
-from wcpredictor.features.odds import align_odds_to_test, load_wc_odds, merge_odds_features
-from wcpredictor.features.ah_odds import align_ah_to_test, load_wc_ah_odds
+from wcpredictor.features.odds import align_odds_to_test, load_wc_odds, merge_odds_features, load_wc_raw_odds
+from wcpredictor.features.ah_odds import align_ah_to_test, load_wc_ah_odds, load_wc_ah_raw_odds
 from wcpredictor.evaluation.metrics import (
     _settle_outcome as _ah_settle_outcome,
     accuracy,
@@ -53,6 +53,7 @@ from wcpredictor.evaluation.metrics import (
     ah_cover_calibration,
     ah_roi,
     brier,
+    fair_line_gap,
     closing_line_value,
     exact_score_logscore,
     goal_mae,
@@ -278,7 +279,7 @@ def _score_model(
     }
 
 
-def backtest_world_cups(years: list[int] | None = None) -> dict:
+def backtest_world_cups(years: list[int] | None = None, dump_permatch_probs: bool = False) -> dict:
     if years is None:
         years = [2010, 2014, 2018, 2022]
 
@@ -304,6 +305,10 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
     # Load AH/O-U market odds (betexplorer WC 2010-2022 CSV; live 2026 from odds-api)
     ah_df = load_wc_ah_odds()
 
+    # Raw (margin-inclusive) odds for EV backtest dump
+    raw_1x2_df = load_wc_raw_odds() if dump_permatch_probs else None
+    raw_ah_df = load_wc_ah_raw_odds() if dump_permatch_probs else None
+
     # Rolling collector for time-aware α fitting (no leakage)
     prev_odds_labels: list[int] = []
     prev_odds_ens_probs: list[list[float]] = []
@@ -315,6 +320,9 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
     prev_ah_model_p: list[float] = []
     prev_ah_market_p: list[float] = []
     prev_ah_thresholds: list[float] = []
+
+    # Per-match probs dump collector for EV backtest
+    permatch_probs_rows: list[dict] = []
 
     # Per-match collector for model_select.py bootstrap analysis
     permatch_rows: list[dict] = []
@@ -642,7 +650,7 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
                     "ah_cover_brier_blend": round(
                         ah_cover_brier(mkt_true_a, mkt_true_b, blend_p_cover, mkt_thresholds), 4
                     ),
-                    "clv": round(closing_line_value(mkt_model_ah_lines, mkt_market_ah_lines), 3),
+                    "fair_line_gap": round(fair_line_gap(mkt_model_ah_lines, mkt_market_ah_lines), 3),
                     "ah_roi_model": round(
                         ah_roi(mkt_true_a, mkt_true_b, mkt_market_ah_lines, mkt_home_odds_raw, mkt_model_p_cover),
                         4,
@@ -698,6 +706,108 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
                 prev_ah_model_p.extend(mkt_model_p_cover)
                 prev_ah_market_p.extend(mkt_market_p_cover)
                 prev_ah_thresholds.extend(mkt_thresholds)
+
+        # ── Per-match probs dump (EV backtest input) ────────────────────────
+        if dump_permatch_probs:
+            _nan = float("nan")
+            # Build raw odds lookups for this fold
+            _raw_1x2: dict[tuple[str, str], dict] = {}
+            if raw_1x2_df is not None:
+                for _, r in raw_1x2_df[raw_1x2_df["year"] == year].iterrows():
+                    _raw_1x2[(str(r.team_a), str(r.team_b))] = {
+                        "h_avg": float(r.h_avg), "d_avg": float(r.d_avg), "a_avg": float(r.a_avg),
+                    }
+                    _raw_1x2[(str(r.team_b), str(r.team_a))] = {
+                        "h_avg": float(r.a_avg), "d_avg": float(r.d_avg), "a_avg": float(r.h_avg),
+                    }
+            _raw_ah: dict[tuple[str, str], dict] = {}
+            if raw_ah_df is not None:
+                for _, r in raw_ah_df[raw_ah_df["year"] == year].iterrows():
+                    ta_, tb_ = str(r.team_a), str(r.team_b)
+                    try:
+                        ah_l = float(r.ah_line)
+                        ah_ho = float(r.ah_home_odds)
+                        ah_ao = float(r.ah_away_odds)
+                        ou_l = float(r.ou_line)
+                        ov = float(r.over_odds)
+                        un = float(r.under_odds)
+                    except (TypeError, ValueError):
+                        ah_l = ah_ho = ah_ao = ou_l = ov = un = _nan
+                    _raw_ah[(ta_, tb_)] = {
+                        "ah_line": ah_l, "ah_home_odds": ah_ho, "ah_away_odds": ah_ao,
+                        "ou_line": ou_l, "over_odds": ov, "under_odds": un,
+                    }
+                    _raw_ah[(tb_, ta_)] = {
+                        "ah_line": -ah_l if not math.isnan(ah_l) else ah_l,
+                        "ah_home_odds": ah_ao, "ah_away_odds": ah_ho,
+                        "ou_line": ou_l, "over_odds": ov, "under_odds": un,
+                    }
+
+            _mkt_probs = ens_probs_market if ens_probs_market else [None] * len(true_a_dc)
+            for i, (row, mat, ga, gb, lbl) in enumerate(
+                zip(test_elo.itertuples(), ens_matrices, true_a_dc, true_b_dc, labels_dc)
+            ):
+                ta_, tb_ = str(row.team_a), str(row.team_b)
+                oxl = _raw_1x2.get((ta_, tb_), {})
+                oxa = _raw_ah.get((ta_, tb_), {})
+                p3 = _mkt_probs[i]
+
+                # Model settlement at market's AH / OU lines (for EV evaluation)
+                ah_settle = {}
+                ou_settle = {}
+                ah_l_raw = oxa.get("ah_line", _nan)
+                ou_l_raw = oxa.get("ou_line", _nan)
+                if not math.isnan(ah_l_raw):
+                    from wcpredictor.markets.asian import goal_diff_distribution as _gdist, settle_line as _sl, total_goals_distribution as _tgdist
+                    _dd = _gdist(mat)
+                    _ah_s = _sl(_dd, -ah_l_raw)
+                    ah_settle = {k: _ah_s[k] for k in ("p_win", "p_half_win", "p_push", "p_half_loss", "p_loss", "fair_odds")}
+                    _ah_away_s = _sl({-k: v for k, v in _dd.items()}, ah_l_raw)
+                    # Store fair_odds for both sides
+                    ah_settle["fair_odds_home"] = _ah_s["fair_odds"]
+                    ah_settle["fair_odds_away"] = _ah_away_s["fair_odds"]
+                if not math.isnan(ou_l_raw):
+                    _td = _tgdist(mat)
+                    _ou_s = _sl(_td, ou_l_raw)
+                    _ou_u = _sl({-k: v for k, v in _td.items()}, -ou_l_raw)
+                    ou_settle = {
+                        "fair_odds_over": _ou_s["fair_odds"],
+                        "fair_odds_under": _ou_u["fair_odds"],
+                    }
+
+                # 1X2 model probs
+                from wcpredictor.markets.edge import outcome_prob as _op
+                p_win_m = _op(mat, "home")
+                p_draw_m = _op(mat, "draw")
+                p_loss_m = _op(mat, "away")
+
+                permatch_probs_rows.append({
+                    "fold": year,
+                    "team_a": ta_, "team_b": tb_,
+                    "goals_a": ga, "goals_b": gb, "label": lbl,
+                    "ens_mkt_p_win": round(p3[0], 6) if p3 else _nan,
+                    "ens_mkt_p_draw": round(p3[1], 6) if p3 else _nan,
+                    "ens_mkt_p_loss": round(p3[2], 6) if p3 else _nan,
+                    "model_p_win": round(p_win_m, 6),
+                    "model_p_draw": round(p_draw_m, 6),
+                    "model_p_loss": round(p_loss_m, 6),
+                    # raw 1X2 market odds
+                    "h_avg": oxl.get("h_avg", _nan),
+                    "d_avg": oxl.get("d_avg", _nan),
+                    "a_avg": oxl.get("a_avg", _nan),
+                    # raw AH/OU market odds
+                    "ah_line": ah_l_raw,
+                    "ah_home_odds": oxa.get("ah_home_odds", _nan),
+                    "ah_away_odds": oxa.get("ah_away_odds", _nan),
+                    "ou_line": ou_l_raw,
+                    "over_odds": oxa.get("over_odds", _nan),
+                    "under_odds": oxa.get("under_odds", _nan),
+                    # model AH settlement at market line
+                    "ah_fair_odds_home": ah_settle.get("fair_odds_home", _nan),
+                    "ah_fair_odds_away": ah_settle.get("fair_odds_away", _nan),
+                    "ou_fair_odds_over": ou_settle.get("fair_odds_over", _nan),
+                    "ou_fair_odds_under": ou_settle.get("fair_odds_under", _nan),
+                })
 
         # ── Compile fold results ────────────────────────────────────────────
         fold: dict = {
@@ -797,6 +907,25 @@ def backtest_world_cups(years: list[int] | None = None) -> dict:
             _w.writeheader()
             _w.writerows(permatch_ah_rows)
 
+    # Per-match probs dump for EV backtest
+    if dump_permatch_probs and permatch_probs_rows:
+        DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+        probs_path = DATA_PROCESSED / "backtest_permatch_probs.csv"
+        _probs_fields = [
+            "fold", "team_a", "team_b", "goals_a", "goals_b", "label",
+            "ens_mkt_p_win", "ens_mkt_p_draw", "ens_mkt_p_loss",
+            "model_p_win", "model_p_draw", "model_p_loss",
+            "h_avg", "d_avg", "a_avg",
+            "ah_line", "ah_home_odds", "ah_away_odds",
+            "ou_line", "over_odds", "under_odds",
+            "ah_fair_odds_home", "ah_fair_odds_away",
+            "ou_fair_odds_over", "ou_fair_odds_under",
+        ]
+        with open(probs_path, "w", newline="") as _f:
+            _w = csv.DictWriter(_f, fieldnames=_probs_fields, extrasaction="ignore")
+            _w.writeheader()
+            _w.writerows(permatch_probs_rows)
+
     return results
 
 
@@ -845,9 +974,17 @@ def _print_report(results: dict) -> None:
 
 
 if __name__ == "__main__":
-    res = backtest_world_cups()
+    import argparse as _argparse
+    _ap = _argparse.ArgumentParser()
+    _ap.add_argument("--dump-probs", action="store_true",
+                     help="Also write backtest_permatch_probs.csv for EV backtest")
+    _args = _ap.parse_args()
+
+    res = backtest_world_cups(dump_permatch_probs=_args.dump_probs)
     _print_report(res)
     DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
     out = DATA_PROCESSED / "backtest_report.json"
     out.write_text(json.dumps(res, indent=2))
     print(f"\nReport written to {out}")
+    if _args.dump_probs:
+        print(f"Per-match probs written to {DATA_PROCESSED / 'backtest_permatch_probs.csv'}")

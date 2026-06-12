@@ -176,11 +176,13 @@ def parse_h2h_1x2(data: list[dict]) -> pd.DataFrame:
 
 
 def parse_market_offers(data: list[dict]) -> pd.DataFrame:
-    """Parse the-odds-api JSON → individual bookmaker spread and totals offers.
+    """Parse the-odds-api JSON → individual bookmaker spread, totals, and 1X2 offers.
 
     Returns DataFrame with columns:
         year, date, team_a, team_b, market, line, side, price, bookmaker
 
+    market='1x2'   : 1X2 match result; line=0 (unused); side ∈ {home, draw, away}.
+                     h2h_lay and two-way (no Draw) markets are skipped.
     market='ah'    : Asian handicap; line is always the home AH line in standard notation
                      (negative = home gives goals).  Both home and away sides are emitted
                      as separate rows so each is a distinct bettable offer.
@@ -209,7 +211,27 @@ def parse_market_offers(data: list[dict]) -> pd.DataFrame:
                 mkey = market.get("key", "")
                 outcomes = market.get("outcomes", [])
 
-                if mkey == "spreads":
+                if mkey == "h2h":
+                    # 3-way 1X2 only — skip if Draw is missing (two-way market)
+                    price_map = {o["name"]: o["price"] for o in outcomes}
+                    ho = price_map.get(home_raw) or price_map.get(ta)
+                    do_ = price_map.get("Draw")
+                    ao = price_map.get(away_raw) or price_map.get(tb)
+                    if ho is None or do_ is None or ao is None:
+                        continue
+                    try:
+                        ho, do_, ao = float(ho), float(do_), float(ao)
+                    except (TypeError, ValueError):
+                        continue
+                    if ho <= 1.0 or do_ <= 1.0 or ao <= 1.0:
+                        continue
+                    base = {"year": 2026, "date": date, "team_a": ta, "team_b": tb,
+                            "market": "1x2", "line": 0.0, "bookmaker": bk}
+                    rows.append({**base, "side": "home", "price": ho})
+                    rows.append({**base, "side": "draw", "price": do_})
+                    rows.append({**base, "side": "away", "price": ao})
+
+                elif mkey == "spreads":
                     home_oc = next(
                         (o for o in outcomes if o.get("name") in (home_raw, ta)), None
                     )

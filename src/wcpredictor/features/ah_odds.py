@@ -134,6 +134,30 @@ def load_wc_ah_odds(csv_path: Path | None = None) -> pd.DataFrame:
 
 # ─── Alignment ─────────────────────────────────────────────────────────────────
 
+def load_wc_ah_raw_odds(csv_path: Path | None = None) -> pd.DataFrame:
+    """Return historical AH/OU raw (margin-inclusive) decimal odds.
+
+    Columns: year, date, team_a, team_b,
+             ah_line, ah_home_odds, ah_away_odds, ou_line, over_odds, under_odds
+
+    Used by ev_backtest to compute true EV against historical prices.
+    """
+    if csv_path is None:
+        csv_path = _AH_CSV
+    if not csv_path.exists():
+        return pd.DataFrame(columns=[
+            "year", "date", "team_a", "team_b",
+            "ah_line", "ah_home_odds", "ah_away_odds",
+            "ou_line", "over_odds", "under_odds",
+        ])
+    df = pd.read_csv(csv_path, parse_dates=["date"])
+    df["team_a"] = df["home"].apply(canonical)
+    df["team_b"] = df["away"].apply(canonical)
+    return df[["year", "date", "team_a", "team_b",
+               "ah_line", "ah_home_odds", "ah_away_odds",
+               "ou_line", "over_odds", "under_odds"]].dropna(subset=["team_a", "team_b"])
+
+
 def align_ah_to_test(
     ah_df: pd.DataFrame,
     year: int,

@@ -34,8 +34,10 @@ from wcpredictor.features.odds import load_wc_odds
 from wcpredictor.predict import _build_frozen_state, _predict_one_frozen
 
 from .schemas import (
-    FixtureRow, PredictResponse, RefreshOddsResponse, RefreshResultsResponse,
-    ResimulateResponse, ScorecardResponse, TeamStanding, TournamentResponse,
+    FixtureRow, LedgerResponse, PredictResponse, RecordBetRequest, RecordBetResponse,
+    RefreshOddsResponse, RefreshResultsResponse, RefreshSgpoolsResponse,
+    ResimulateResponse, ScorecardResponse, SgpoolsAddRequest,
+    TeamStanding, TournamentResponse, ValueBetsResponse,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -512,6 +514,192 @@ def resimulate(
         )
     finally:
         _REFRESH_LOCK.release()
+
+
+@app.get("/value-bets", response_model=ValueBetsResponse)
+def value_bets(
+    min_ev: float = Query(0.0, description="Minimum EV threshold"),
+    require_consensus: bool = Query(True, description="Require price ≥ consensus fair (double-confirmation)"),
+) -> ValueBetsResponse:
+    """Scan SG Pools offers for +EV bets.
+
+    Requires SG Pools offers to be loaded (POST /sgpools-offers or manual CSV entry).
+    Consensus benchmark comes from data/raw/odds_api_wc2026.json (POST /refresh-odds to update).
+    """
+    from wcpredictor.markets.value_scan import scan as _value_scan
+
+    as_of = _default_as_of()
+
+    # Staleness banners
+    consensus_age_note = ""
+    offers_age_note = ""
+    try:
+        live_json = DATA_RAW / "odds_api_wc2026.json"
+        if live_json.exists():
+            import datetime as _dt
+            age_hours = (pd.Timestamp.utcnow() - pd.Timestamp(live_json.stat().st_mtime, unit="s")).total_seconds() / 3600
+            if age_hours > 4:
+                consensus_age_note = f"Consensus snapshot is {age_hours:.0f}h old — POST /refresh-odds to update."
+        else:
+            consensus_age_note = "No consensus snapshot — POST /refresh-odds first."
+    except Exception:
+        pass
+    try:
+        from wcpredictor.data.sgpools import load_sgpools_offers as _lsgp, _CSV_PATH as _sgp_csv
+        _sgp_df = _lsgp()
+        if _sgp_df.empty:
+            offers_age_note = "No SG Pools offers on file. Use POST /sgpools-offers to add offers."
+    except Exception:
+        offers_age_note = "SG Pools offers unavailable."
+
+    bets_raw = _value_scan(as_of=as_of, min_ev=min_ev, require_consensus=require_consensus)
+
+    from .schemas import ValueBet
+    bet_models = [
+        ValueBet(
+            date=b["date"],
+            team_a=b["team_a"],
+            team_b=b["team_b"],
+            market=b["market"],
+            line=b["line"],
+            side=b["side"],
+            sgpools_price=b["sgpools_price"],
+            fair_model=b.get("fair_model"),
+            ev_model=b["ev_model"],
+            fair_consensus=b.get("fair_consensus"),
+            ev_consensus=b.get("ev_consensus"),
+            recommended=b["recommended"],
+            recommended_stake=b["recommended_stake"],
+            sizing_tier=b.get("sizing_tier", "min_stake"),
+            confidence_flags=b.get("confidence_flags", []),
+        )
+        for b in bets_raw
+    ]
+
+    n_recommended = sum(1 for b in bets_raw if b.get("recommended"))
+    sizing_tier = bets_raw[0]["sizing_tier"] if bets_raw else "min_stake"
+
+    return ValueBetsResponse(
+        as_of=as_of,
+        n_offers=len(bets_raw),
+        n_recommended=n_recommended,
+        sizing_tier=sizing_tier,
+        consensus_age_note=consensus_age_note,
+        offers_age_note=offers_age_note,
+        bets=bet_models,
+    )
+
+
+@app.post("/sgpools-offers", response_model=dict)
+def add_sgpools_offers(request: SgpoolsAddRequest) -> dict:
+    """Add a single SG Pools offer via the API (manual entry fallback)."""
+    from wcpredictor.data.sgpools import add_offer as _add_offer
+
+    try:
+        _add_offer(
+            team_a=request.team_a,
+            team_b=request.team_b,
+            date=request.date,
+            market=request.market,
+            line=request.line,
+            side=request.side,
+            price=request.price,
+            source="manual",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return {"status": "ok", "note": f"Offer recorded: {request.team_a} vs {request.team_b} {request.market} {request.side}@{request.price}"}
+
+
+@app.post("/refresh-sgpools", response_model=RefreshSgpoolsResponse)
+def refresh_sgpools() -> RefreshSgpoolsResponse:
+    """Fetch latest SG Pools WC2026 football odds (approved automated fetcher).
+
+    Non-fatal on network/parse failure — manual entry is always the fallback.
+    Archives raw JSON snapshots to data/raw/sgpools_snapshots/.
+    """
+    from wcpredictor.data.sgpools import fetch_sgpools_offers as _fetch
+
+    try:
+        df = _fetch()
+        n_fetched = len(df)
+        if n_fetched > 0:
+            return RefreshSgpoolsResponse(
+                status="ok",
+                n_fetched=n_fetched,
+                note=f"Fetched {n_fetched} offers from SG Pools.",
+            )
+        else:
+            return RefreshSgpoolsResponse(
+                status="ok",
+                n_fetched=0,
+                note="SG Pools fetch succeeded but returned no WC offers. Site structure may have changed.",
+            )
+    except Exception as exc:
+        return RefreshSgpoolsResponse(
+            status="error",
+            n_fetched=0,
+            note=f"SG Pools fetch failed: {exc}. Use manual entry.",
+        )
+
+
+@app.post("/bets", response_model=RecordBetResponse)
+def record_bet(request: RecordBetRequest) -> RecordBetResponse:
+    """Record a placed bet in the ledger."""
+    from wcpredictor.data.bets import record_bet as _record
+
+    try:
+        _record(
+            team_a=request.team_a,
+            team_b=request.team_b,
+            date=request.date,
+            market=request.market,
+            line=request.line,
+            side=request.side,
+            price_taken=request.price_taken,
+            stake=request.stake,
+            consensus_fair_at_placement=request.consensus_fair_at_placement,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    from wcpredictor.data.normalize_teams import canonical as _can
+    ta = _can(request.team_a) or request.team_a
+    tb = _can(request.team_b) or request.team_b
+    return RecordBetResponse(
+        status="ok",
+        match=f"{ta} vs {tb}",
+        market=request.market,
+        side=request.side,
+        price_taken=request.price_taken,
+        stake=request.stake,
+    )
+
+
+@app.get("/ledger", response_model=LedgerResponse)
+def ledger() -> LedgerResponse:
+    """Return P&L summary and stop-rule status from the bet ledger."""
+    from wcpredictor.data.bets import ledger_summary, load_ledger
+
+    summary = ledger_summary()
+    df = load_ledger()
+    bets_list = df.to_dict(orient="records") if not df.empty else []
+
+    return LedgerResponse(
+        total_bets=summary["total_bets"],
+        settled_bets=summary["settled_bets"],
+        open_bets=summary["open_bets"],
+        total_staked=summary["total_staked"],
+        total_pnl=summary["total_pnl"],
+        roi=summary["roi"] if not (isinstance(summary["roi"], float) and math.isnan(summary["roi"])) else None,
+        trailing_clv_mean=summary.get("trailing_clv_mean"),
+        drawdown_units=summary["drawdown_units"],
+        stop_clv=summary["stop_clv"],
+        stop_drawdown=summary["stop_drawdown"],
+        stop_rule_triggered=summary["stop_rule_triggered"],
+        bets=bets_list,
+    )
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

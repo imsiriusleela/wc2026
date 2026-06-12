@@ -1,4 +1,5 @@
-"""Tests for parse_market_offers (Step 1) and edge.py evaluate_offers (Step 2)."""
+"""Tests for parse_market_offers (Step 1), edge.py evaluate_offers (Step 2),
+and 1X2 evaluation plumbing (M1)."""
 from __future__ import annotations
 
 import json
@@ -27,11 +28,15 @@ def test_parse_market_offers_columns(fixture_data):
 def test_parse_market_offers_row_count(fixture_data):
     from wcpredictor.data.download_odds_api import parse_market_offers
     df = parse_market_offers(fixture_data)
-    # event1/book1: spreads (home+away) + totals (over+under) = 4
-    # event1/book2: spreads (home+away) = 2
-    # event2 (Brazil/Mexico): totals (over+under) = 2
-    # event3 is placeholder → skipped
-    assert len(df) == 8
+    # event1/book1: h2h(3) + spreads(2) + totals(2) = 7
+    # event1/book2: h2h(3) + spreads(2) = 5
+    # event1/book3: h2h(3) = 3
+    # book4_two_way (no Draw → skipped)
+    # event2/book1: totals(2) = 2
+    # event3 placeholder → skipped
+    # Total spreads+totals+1x2: 7+5+3+2 = 17
+    # After dedup: same team+market+line+side+bookmaker; no exact dups here
+    assert len(df) == 17
 
 
 def test_parse_market_offers_both_sides_share_home_line(fixture_data):
@@ -206,6 +211,143 @@ def test_evaluate_offers_p_cover_field():
     offers = [{"market": "ah", "line": -0.5, "side": "home", "price": 2.0, "bookmaker": "bk"}]
     r = evaluate_offers(mat, offers)[0]
     assert abs(r["p_cover"] - (r["p_win"] + r["p_half_win"])) < 1e-9
+
+
+# ─── 1X2 evaluation (M1) ────────────────────────────────────────────────────
+
+def test_parse_market_offers_1x2_columns(fixture_data):
+    from wcpredictor.data.download_odds_api import parse_market_offers
+    df = parse_market_offers(fixture_data)
+    x2_rows = df[df["market"] == "1x2"]
+    assert not x2_rows.empty
+    assert set(x2_rows["side"].unique()).issuperset({"home", "draw", "away"})
+
+
+def test_parse_market_offers_1x2_prices_match_fixture(fixture_data):
+    """event1/book1 h2h: USA@1.80, Draw@3.50, BiH@4.20."""
+    from wcpredictor.data.download_odds_api import parse_market_offers
+    from wcpredictor.data.normalize_teams import canonical
+    df = parse_market_offers(fixture_data)
+    usa = canonical("USA")
+    x2 = df[(df["market"] == "1x2") & (df["bookmaker"] == "book1") & (df["team_a"] == usa)]
+    home_row = x2[x2["side"] == "home"]
+    draw_row = x2[x2["side"] == "draw"]
+    away_row = x2[x2["side"] == "away"]
+    assert len(home_row) == 1 and abs(home_row.iloc[0]["price"] - 1.80) < 1e-9
+    assert len(draw_row) == 1 and abs(draw_row.iloc[0]["price"] - 3.50) < 1e-9
+    assert len(away_row) == 1 and abs(away_row.iloc[0]["price"] - 4.20) < 1e-9
+
+
+def test_parse_market_offers_two_way_h2h_skipped(fixture_data):
+    """book4_two_way has no Draw → should be skipped in 1x2 parsing."""
+    from wcpredictor.data.download_odds_api import parse_market_offers
+    df = parse_market_offers(fixture_data)
+    book4 = df[df["bookmaker"] == "book4_two_way"]
+    assert book4.empty, "Two-way h2h (no Draw) must be skipped"
+
+
+def test_outcome_prob_sums_to_one():
+    from wcpredictor.markets.edge import outcome_prob
+    mat = _tiny_matrix()
+    ph = outcome_prob(mat, "home")
+    pd_ = outcome_prob(mat, "draw")
+    pa = outcome_prob(mat, "away")
+    assert abs(ph + pd_ + pa - 1.0) < 1e-9
+
+
+def test_outcome_prob_values():
+    """Tiny matrix: home P(1-0,2-0)=0.5; draw P(0-0,1-1)=0.3; away P(0-1)=0.2."""
+    from wcpredictor.markets.edge import outcome_prob
+    mat = _tiny_matrix()
+    assert abs(outcome_prob(mat, "home") - 0.5) < 1e-9
+    assert abs(outcome_prob(mat, "draw") - 0.3) < 1e-9
+    assert abs(outcome_prob(mat, "away") - 0.2) < 1e-9
+
+
+def test_evaluate_offers_1x2_fair_odds():
+    """1X2 EV = 0 at fair odds (= 1/p_outcome)."""
+    from wcpredictor.markets.edge import evaluate_offers, outcome_prob
+    mat = _tiny_matrix()
+    p_home = outcome_prob(mat, "home")  # 0.5
+    fair = round(1.0 / p_home, 4)
+    offers = [{"market": "1x2", "line": 0.0, "side": "home", "price": fair, "bookmaker": "bk"}]
+    r = evaluate_offers(mat, offers)[0]
+    assert abs(r["ev"]) < 1e-4
+    assert abs(r["fair_odds"] - fair) < 1e-3
+
+
+def test_evaluate_offers_1x2_no_push_fields():
+    """1X2 must have p_push=0, p_half_win=0, p_half_loss=0."""
+    from wcpredictor.markets.edge import evaluate_offers
+    mat = _tiny_matrix()
+    offers = [{"market": "1x2", "line": 0.0, "side": "draw", "price": 3.0, "bookmaker": "bk"}]
+    r = evaluate_offers(mat, offers)[0]
+    assert r["p_push"] == 0.0
+    assert r["p_half_win"] == 0.0
+    assert r["p_half_loss"] == 0.0
+
+
+def test_1x2_flip_symmetry():
+    """Reversed lookup for 1x2 (home↔away swap) gives same EV from the reversed match perspective."""
+    from wcpredictor.markets.edge import evaluate_offers
+    mat_fwd = _tiny_matrix()
+    n = len(mat_fwd)
+    mat_rev = [[mat_fwd[j][i] for j in range(n)] for i in range(n)]
+
+    fwd = [{"market": "1x2", "line": 0.0, "side": "home", "price": 2.0, "bookmaker": "bk"}]
+    # After _load_offers_lookup reversal: home→away
+    rev = [{"market": "1x2", "line": 0.0, "side": "away", "price": 2.0, "bookmaker": "bk"}]
+
+    fwd_ev = evaluate_offers(mat_fwd, fwd)[0]["ev"]
+    rev_ev = evaluate_offers(mat_rev, rev)[0]["ev"]
+    assert abs(fwd_ev - rev_ev) < 1e-6
+
+
+def test_consensus_fair_1x2():
+    """consensus_fair for a 3-way market: median de-margined prob."""
+    from wcpredictor.markets.edge import consensus_fair
+    offers = [
+        {"market": "1x2", "side": "home", "price": 1.80, "bookmaker": "bk1"},
+        {"market": "1x2", "side": "draw", "price": 3.50, "bookmaker": "bk1"},
+        {"market": "1x2", "side": "away", "price": 4.20, "bookmaker": "bk1"},
+        {"market": "1x2", "side": "home", "price": 1.90, "bookmaker": "bk2"},
+        {"market": "1x2", "side": "draw", "price": 3.40, "bookmaker": "bk2"},
+        {"market": "1x2", "side": "away", "price": 4.00, "bookmaker": "bk2"},
+    ]
+    fair = consensus_fair(offers, "1x2", None, "home")
+    assert fair is not None
+    # fair_home should be > 1.80 (raw price) and < 2.5 (rough ballpark)
+    assert 1.5 < fair < 2.5
+
+
+def test_consensus_fair_ah():
+    """consensus_fair for a two-way AH market."""
+    from wcpredictor.markets.edge import consensus_fair
+    offers = [
+        {"market": "ah", "side": "home", "price": 1.95, "line": -0.75, "bookmaker": "bk1"},
+        {"market": "ah", "side": "away", "price": 1.90, "line": -0.75, "bookmaker": "bk1"},
+        {"market": "ah", "side": "home", "price": 1.92, "line": -0.75, "bookmaker": "bk2"},
+        {"market": "ah", "side": "away", "price": 1.93, "line": -0.75, "bookmaker": "bk2"},
+    ]
+    fair = consensus_fair(offers, "ah", -0.75, "home")
+    assert fair is not None
+    assert 1.85 < fair < 2.05  # ballpark near 1.92
+
+
+def test_consensus_fair_returns_none_on_empty():
+    from wcpredictor.markets.edge import consensus_fair
+    assert consensus_fair([], "1x2", None, "home") is None
+
+
+def test_consensus_fair_ignores_wrong_line():
+    """consensus_fair for AH must ignore offers at a different line."""
+    from wcpredictor.markets.edge import consensus_fair
+    offers = [
+        {"market": "ah", "side": "home", "price": 1.95, "line": -0.5, "bookmaker": "bk"},
+        {"market": "ah", "side": "away", "price": 1.90, "line": -0.5, "bookmaker": "bk"},
+    ]
+    # Request for -1.0 line → no matching offers → None
+    assert consensus_fair(offers, "ah", -1.0, "home") is None
 
 
 # ─── Integration: frozen-state predict ───────────────────────────────────────
